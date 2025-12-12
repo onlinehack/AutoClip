@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  autoclip-studio:
+    build:
+      context: ../
+      dockerfile: deploy/Dockerfile
+    container_name: autoclip-studio
+    ports:
+      - "8501:8501"
+    volumes:
+      # Mount assets folder to persist input media
+      - ../assets:/app/assets
+      # Mount output folder to persist generated videos
+      - ../output:/app/output
+    environment:
+      - TZ=Asia/Shanghai
+    restart: unless-stopped
