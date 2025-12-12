@@ -1,0 +1,14 @@
+# Exclude version control
+.git
+.gitignore
+
+# Exclude large media assets (mounted via volume instead)
+assets/
+output/
+
+# Exclude environment and local configs
+.env
+deploy/
+.devcontainer/
+__pycache__/
+*.pyc
