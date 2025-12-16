@@ -99,6 +99,10 @@ class Matcher:
         w, h = clip.size
         target_w, target_h = target_size
         
+        # Optimization: Skip if dimensions exactly match
+        if w == target_w and h == target_h:
+            return clip
+        
         # Calculate aspect ratios
         aspect_ratio = w / h
         target_aspect = target_w / target_h

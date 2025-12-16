@@ -133,11 +133,23 @@ class AutoClipPipeline:
             
             part_files = []
             
+            batch_start_time = time.time()
+            last_step_time = time.time()
+            
             for idx, seg in enumerate(segments):
+                current_time = time.time()
+                elapsed = current_time - batch_start_time
+                step_dur = current_time - last_step_time if idx > 0 else 0
+                last_step_time = current_time
+                
+                msg = f"Batch {i+1}: Rendering part {idx+1}/{len(segments)} | Elapsed: {elapsed:.1f}s"
+                if idx > 0:
+                    msg += f" (Last: {step_dur:.1f}s)"
+                    
                 if progress_callback:
-                    progress_callback(0.2 + 0.6 * (idx / len(segments)), f"Batch {i+1}: Rendering segment {idx+1}/{len(segments)}")
+                    progress_callback(0.2 + 0.6 * (idx / len(segments)), msg)
 
-                print(f"[{datetime.now()}] Processing segment {idx+1}/{len(segments)}")
+                print(f"[{datetime.now()}] Processing segment {idx+1}/{len(segments)} | {msg}")
                 
                 seg_start = seg["start"]
                 seg_end = seg["end"]
