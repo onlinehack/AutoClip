@@ -1,19 +1,21 @@
-# 🚀 AutoClip Studio - 自动化视频混剪系统
+# 🚀 AutoClip Studio - 自动化视频混剪系统 (Audio Driven)
 
-AutoClip Studio 是一个基于 Python 和 Streamlit 的全自动化视频生成工具。它能够根据您输入的文案脚本，自动匹配并在多个素材库中抽取视频片段，结合 TTS 语音合成与背景音乐，一键生成高质量的短视频。
+AutoClip Studio 是一个基于 Python 和 Streamlit 的全自动化视频生成工具。它改为**音频驱动 (Audio Driven)** 模式，支持用户上传音频文件（解说/旁白），系统将自动进行语音识别生成字幕（或加载用户提供的字幕），并根据音频时长智能匹配视频素材，一键生成高质量短视频。
 
 ## ✨ 功能特性
 
-*   **智能混剪**：支持从多个视频素材文件夹中随机抽取片段进行混剪。
+*   **音频驱动**：直接上传 MP3/WAV/M4A 音频文件作为主轨道，视频时长自动适配音频。
+*   **自动字幕 (FunASR)**：内置阿里达摩院 FunASR 模型，若未上传字幕文件，可自动识别语音生成高精度 SRT 字幕。
+*   **智能混剪**：根据音频时长，自动从多个视频素材文件夹中随机抽取片段进行填充。
 *   **灵活编排**：自定义素材文件夹的**播放顺序**和**时长权重**（百分比），精准控制视频节奏。
-*   **语音合成**：集成 Edge TTS，支持多种高质量语音角色（如 Xiaoxiao, Yunxi, Aria 等）。
+*   **字幕自定义**：支持上传现成的 SRT 字幕文件，系统支持字幕样式调整及时间轴自动偏移修正。
 *   **背景音乐**：支持自动混音 BGM，可从 `assets/bgm` 目录选择。
 *   **批量生成**：支持一次性生成多个不同版本的视频。
 *   **多分辨率支持**：
     *   TikTok / Shorts / Reels (1080x1920)
     *   横屏视频 (1920x1080)
     *   自定义分辨率
-*   **可视化界面**：提供直观的 Streamlit Web 界面，实时预览配置与生成结果。
+*   **可视化界面**：提供直观的 Streamlit Web 界面 (全中文)，实时预览进度与耗时。
 
 ## 📂 目录结构
 
@@ -23,13 +25,11 @@ moviecut/
 │   ├── video/              # 视频素材（请在此创建子文件夹分类存放）
 │   └── bgm/                # 背景音乐 (.mp3, .wav)
 ├── deploy/                 # 部署相关文件
-│   ├── Dockerfile
-│   └── docker-compose.yml
 ├── output/                 # 视频生成输出目录
 ├── src/                    # 核心代码库
 │   ├── pipeline.py         # 核心处理流程
 │   ├── models.py           # 数据模型
-│   └── processors/         # 各类处理器
+│   ├── processors/         # ASR/Matcher/ASR处理器
 ├── gui_app.py              # Streamlit 启动入口
 ├── requirements.txt        # 依赖列表
 └── README.md               # 项目说明文档
@@ -39,7 +39,7 @@ moviecut/
 
 ### 方式一：本地运行 (Local)
 
-1.  **环境准备**：确保已安装 Python 3.8+。
+1.  **环境准备**：确保已安装 Python 3.10+ 并安装了 FFmpeg（需配置到 PATH）。
 2.  **安装依赖**：
     ```bash
     pip install -r requirements.txt
@@ -55,44 +55,32 @@ moviecut/
 
 ### 方式二：Docker 部署
 
-本项目提供了 Docker 支持，可轻松隔离环境运行。
+详见 `deploy` 目录下的说明或直接构建：
 
-1.  **进入部署目录**（或在根目录使用指定文件）：
-    ```bash
-    cd deploy
-    ```
-    *注意：如果要在根目录构建，可能需要调整 `docker-compose.yml` 中的上下文路径，或者直接使用以下命令：*
-
-    **推荐：在根目录下直接构建运行**
-    确保 `docker-compose.yml` (如果位于 `deploy/` 中) 指向正确的构建上下文，或者使用简单的 Docker 命令：
-
-    ```bash
-    docker build -t autoclip-studio -f deploy/Dockerfile .
-    docker run -p 8501:8501 -v $(pwd)/assets:/app/assets -v $(pwd)/output:/app/output autoclip-studio
-    ```
-
-    或者使用 `docker-compose` (需确保 `deploy/docker-compose.yml` 配置正确映射了上级目录)：
-    ```bash
-    docker-compose -f deploy/docker-compose.yml up --build -d
-    ```
+```bash
+docker build -t autoclip-studio -f deploy/Dockerfile .
+docker run -p 8501:8501 -v $(pwd)/assets:/app/assets -v $(pwd)/output:/app/output autoclip-studio
+```
 
 ## 📖 使用指南
 
-1.  **脚本设置**：在左侧输入您的视频文案脚本 (Prompt/Script)。
-2.  **选择语音**：在侧边栏选择您喜欢的配音角色。
+1.  **上传音频**：在界面左侧上传您的解说音频文件 (MP3/WAV)。
+2.  **字幕设置**：
+    *   (可选) 上传配套的 SRT 字幕文件。
+    *   如果不上传，系统将自动使用 **FunASR** 模型进行语音识别生成字幕。
 3.  **配置素材**：
-    *   系统会自动读取 `assets/video` 下的子文件夹。
-    *   在界面右侧勾选需要使用的素材文件夹。
-    *   **拖动排序**：决定素材出现的先后顺序。
+    *   在界面右侧选择参与混剪的素材文件夹。
+    *   **排序**：决定素材出现的先后顺序。
     *   **调整权重**：滑动滑块决定该类素材在视频中占据的时长比例。
-4.  **开始生成**：点击“🎬 开始生成”按钮。
-5.  **预览与导出**：生成完成后，视频将直接在界面展示，文件保存在 `output/` 目录。
+4.  **全局设置**：在侧边栏设置生成数量、视频分辨率等。
+5.  **开始生成**：点击“🎬 开始生成”按钮，观察实时进度和日志。
+6.  **预览与导出**：生成完成后，视频将直接在界面展示，文件保存在 `output/YYYYMMDD_HHMMSS_Batch/` 目录。
 
 ## ⚠️ 注意事项
 
-*   请确保 `assets/video` 目录下至少有一个包含视频文件的子文件夹，否则无法生成。
-*   生成的视频默认使用 GPU 加速（如果环境支持且配置了相关库），否则使用 CPU，速度可能较慢。
-*   初次运行可能会下载 ImageMagick 策略或其他依赖模型，请保持网络通畅。
+*   **FFmpeg**：项目依赖 FFmpeg 进行视频合成及字幕烧录，请确保系统已安装。
+*   **FunASR模型**：首次运行时会自动下载 FunASR 相关模型（Paraformer, FSMN, CT-Transformer），请保持网络通畅。
+*   **素材要求**：视频素材分辨率若不足 1080p，系统会自动填充或 resize 适配，但建议使用高清素材以获最佳效果。
 
 ---
 Enjoy creating! 🎥
