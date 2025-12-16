@@ -6,8 +6,8 @@ class FolderWeight(BaseModel):
     weight: int
 
 class MixConfig(BaseModel):
-    text: str
-    voice: str = "zh-CN-XiaoxiaoNeural"
+    audio_path: str
+    srt_path: Optional[str] = None
     folder_weights: List[FolderWeight]
     batch_count: int = 1
     width: int = 1080

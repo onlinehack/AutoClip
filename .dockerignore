@@ -12,3 +12,4 @@ deploy/
 .devcontainer/
 __pycache__/
 *.pyc
+temp_uploads/
