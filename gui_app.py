@@ -1,31 +1,32 @@
 import streamlit as st
 import os
+import time
 from src.models import MixConfig, FolderWeight
 from src.pipeline import AutoClipPipeline
 from src.utils import get_subfolders
 
 st.set_page_config(page_title="AutoClip Studio", layout="wide")
 
-st.title("🚀 AutoClip Studio (Audio Driven)")
+st.title("🚀 AutoClip 智能混剪 (音频驱动)")
 
 # Assets Path
 ASSETS_DIR = os.path.join(os.getcwd(), "assets")
 OUTPUT_DIR = os.path.join(os.getcwd(), "output")
 
 # Sidebar / Config
-st.sidebar.header("Global Settings")
-batch_count = st.sidebar.number_input("Generate Count", min_value=1, value=1)
+st.sidebar.header("全局设置")
+batch_count = st.sidebar.number_input("生成视频数量", min_value=1, value=1)
 
-st.sidebar.subheader("Resolution")
+st.sidebar.subheader("视频分辨率")
 res_option = st.sidebar.selectbox(
-    "Select Resolution",
-    ["TikTok / Reels (1080x1920)", "Shorts (1080x1920)", "Horizontal (1920x1080)", "Custom"]
+    "选择分辨率",
+    ["抖音 / Reels (1080x1920)", "Shorts (1080x1920)"]
 )
 
-if res_option == "Custom":
-    vid_width = st.sidebar.number_input("Width", min_value=100, value=1080, step=10)
-    vid_height = st.sidebar.number_input("Height", min_value=100, value=1920, step=10)
-elif "Horizontal" in res_option:
+if res_option == "自定义":
+    vid_width = st.sidebar.number_input("宽度", min_value=100, value=1080, step=10)
+    vid_height = st.sidebar.number_input("高度", min_value=100, value=1920, step=10)
+elif "横屏" in res_option:
     vid_width, vid_height = 1920, 1080
 else:
     # TikTok / Shorts default
@@ -35,14 +36,14 @@ else:
 col1, col2 = st.columns([1, 1])
 
 with col1:
-    st.subheader("1. Audio & Subtitles")
+    st.subheader("1. 音频与字幕")
     
     # Ensure temp dir exists
     TEMP_UPLOAD_DIR = os.path.join(os.getcwd(), "temp_uploads")
     os.makedirs(TEMP_UPLOAD_DIR, exist_ok=True)
     
-    uploaded_audio = st.file_uploader("Upload Audio (Required)", type=['mp3', 'wav', 'm4a'])
-    uploaded_srt = st.file_uploader("Upload SRT (Optional)", type=['srt'])
+    uploaded_audio = st.file_uploader("上传音频 (必选)", type=['mp3', 'wav', 'm4a'])
+    uploaded_srt = st.file_uploader("上传 SRT 字幕 (可选)", type=['srt'])
     
     audio_path_str = ""
     srt_path_str = None
@@ -52,43 +53,43 @@ with col1:
         audio_path_str = os.path.join(TEMP_UPLOAD_DIR, uploaded_audio.name)
         with open(audio_path_str, "wb") as f:
             f.write(uploaded_audio.getbuffer())
-        st.success(f"Loaded: {uploaded_audio.name}")
+        st.success(f"已加载: {uploaded_audio.name}")
             
     if uploaded_srt:
         srt_path_str = os.path.join(TEMP_UPLOAD_DIR, uploaded_srt.name)
         with open(srt_path_str, "wb") as f:
             f.write(uploaded_srt.getbuffer())
-        st.success(f"Loaded: {uploaded_srt.name}")
+        st.success(f"已加载: {uploaded_srt.name}")
     else:
-        st.info("No SRT uploaded. Will auto-generate using FunASR.")
+        st.info("未上传字幕。将使用 FunASR 自动生成。")
 
     bgm_files = []
     bgm_dir = os.path.join(ASSETS_DIR, "bgm")
     if os.path.exists(bgm_dir):
         bgm_files = [f for f in os.listdir(bgm_dir) if f.endswith(('.mp3', '.wav'))]
     
-    bgm_selected = st.selectbox("Background Music (Optional)", ["None"] + bgm_files)
+    bgm_selected = st.selectbox("背景音乐 (可选)", ["无 (None)"] + bgm_files)
 
 with col2:
-    st.subheader("2. Visual Material & Weights")
-    st.info("💡 Order determines timeline flow. Weight determines duration share.")
+    st.subheader("2. 视觉素材与权重")
+    st.info("💡 顺序决定时间线流程。权重决定时长占比。")
     
     video_root = os.path.join(ASSETS_DIR, "video")
     subfolders = get_subfolders(video_root)
     
     folder_weights = []
     if not subfolders:
-        st.warning(f"No subfolders found in {video_root}. Please add video assets.")
+        st.warning(f"{video_root} 未找到子文件夹。请添加视频素材。")
     else:
         # User defined order
         selected_ordered_subfolders = st.multiselect(
-            "Select and Order Video Folders", 
+            "选择并排序视频素材文件夹", 
             options=subfolders,
             default=subfolders
         )
 
         if not selected_ordered_subfolders:
-             st.warning("Please select at least one folder.")
+             st.warning("请至少选择一个文件夹。")
         else:
             ordered_weights_list = [] # Store tuples (folder, weight)
 
@@ -101,22 +102,22 @@ with col2:
             total_w = sum(w for _, w in ordered_weights_list)
             
             if total_w > 0:
-                st.write("**Timeline Distribution:**")
+                st.write("**时间线分布:**")
                 for f, w in ordered_weights_list:
                     pct = (w / total_w) * 100
                     st.write(f"- **{f}**: {pct:.1f}%")
                     folder_weights.append(FolderWeight(folder=f, weight=w))
             else:
-                st.error("Total weight must be > 0")
+                st.error("总权重必须大于 0")
 
 st.divider()
 
 # Action Logic
-if st.button("🎬 Start Generation", type="primary"):
+if st.button("🎬 开始生成", type="primary"):
     if not uploaded_audio:
-        st.error("Please upload an audio file.")
+        st.error("请上传音频文件。")
     elif not folder_weights:
-        st.error("Please configure folder weights.")
+        st.error("请配置文件夹权重。")
     else:
         # Config
         config = MixConfig(
@@ -124,7 +125,7 @@ if st.button("🎬 Start Generation", type="primary"):
             srt_path=srt_path_str,
             folder_weights=folder_weights,
             batch_count=batch_count,
-            bgm_file=None if bgm_selected == "None" else bgm_selected,
+            bgm_file=None if bgm_selected == "无 (None)" else bgm_selected,
             width=vid_width,
             height=vid_height
         )
@@ -134,27 +135,34 @@ if st.button("🎬 Start Generation", type="primary"):
         
         progress_bar = st.progress(0)
         status_text = st.empty()
+        timer_text = st.empty()
+        
+        start_ts = time.time()
         
         def update_progress(p, msg):
             progress_bar.progress(p)
             status_text.text(msg)
+            elapsed = time.time() - start_ts
+            timer_text.info(f"⏱️ 已耗时: {elapsed:.1f}s")
             
         try:
             results = pipeline.run(config, progress_callback=update_progress)
-            st.success(f"Successfully generated {len(results)} videos!")
+            total_duration = time.time() - start_ts
+            st.success(f"成功生成 {len(results)} 个视频，耗时 {total_duration:.2f} 秒！")
+            timer_text.empty() # Clear running timer
             
             st.write("---")
             for i in range(0, len(results), 2):
                 cols = st.columns(2)
                 with cols[0]:
-                    st.write(f"**Output:** `{os.path.basename(results[i])}`")
+                    st.write(f"**输出文件:** `{os.path.basename(results[i])}`")
                     st.video(results[i])
                 
                 if i + 1 < len(results):
                     with cols[1]:
-                        st.write(f"**Output:** `{os.path.basename(results[i+1])}`")
+                        st.write(f"**输出文件:** `{os.path.basename(results[i+1])}`")
                         st.video(results[i+1])
 
         except Exception as e:
-            st.error(f"Error: {str(e)}")
+            st.error(f"错误: {str(e)}")
             st.exception(e) 

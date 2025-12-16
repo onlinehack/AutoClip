@@ -8,5 +8,5 @@ funasr
 modelscope
 torch
 torchaudio
-ffmpeg-python
 pysrt
+numpy

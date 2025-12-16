@@ -11,7 +11,7 @@ from src.models import MixConfig
 # from src.utils import split_text # No longer needed
 from src.processors.asr import generate_srt
 from src.processors.matcher import Matcher
-from src.processors.subtitle import create_subtitle_clip
+
 
 class AutoClipPipeline:
     def __init__(self, assets_dir: str, output_dir: str):
@@ -151,8 +151,8 @@ class AutoClipPipeline:
                          # Fallback to color clip
                          print(f"[{datetime.now()}] Warning: No video found for chunk {idx}, using black placeholder.")
                          video_clip = ColorClip(size=(config.width, config.height), color=(0,0,0), duration=duration)
-                    # else:
-                    #     video_clip = self.matcher.resize_and_crop(video_clip, (config.width, config.height))
+                    else:
+                        video_clip = self.matcher.resize_and_crop(video_clip, (config.width, config.height))
                     
                     video_clip = video_clip.set_duration(duration)
                     
@@ -201,6 +201,9 @@ class AutoClipPipeline:
                 final_video_visual = concatenate_videoclips(clip_objects, method="compose")
                 
                 # Set Audio
+                if progress_callback:
+                    progress_callback(0.85, f"Batch {i+1}: Assembling & syncing audio...")
+                
                 final_duration = main_audio.duration
                 if final_video_visual.duration > final_duration:
                      print(f"[{datetime.now()}] Video ({final_video_visual.duration}s) > Audio ({final_duration}s). Clipping video.")
@@ -210,26 +213,10 @@ class AutoClipPipeline:
                      final_video_visual = final_video_visual.set_duration(final_duration)
                      
                 # Overlay Subtitles Globally
-                print(f"[{datetime.now()}] Generating global subtitle overlay...")
-                subtitle_clips = []
-                for sub in subs:
-                    s_start = sub.start.ordinal / 1000.0
-                    s_end = sub.end.ordinal / 1000.0
-                    s_dur = s_end - s_start
-                    
-                    if s_dur > 0 and sub.text.strip():
-                        # We use the full duration for the clip, but set start time
-                        txt = create_subtitle_clip(
-                            sub.text, 
-                            duration=s_dur, 
-                            size=(config.width, config.height)
-                        ).set_start(s_start)
-                        subtitle_clips.append(txt)
-                
-                if subtitle_clips:
-                    # Use CompositeVideoClip to overlay text on video
-                    # Note: We must ensure the video is the first element (layer 0)
-                    final_video_visual = CompositeVideoClip([final_video_visual] + subtitle_clips)
+                # Subtitles will be burnt in via FFmpeg filter during write_videofile
+                if progress_callback:
+                    progress_callback(0.9, f"Batch {i+1}: Preparing subtitle filter...")
+                print(f"[{datetime.now()}] Subtitles will be added via ffmpeg filter.")
 
                 final_video = final_video_visual.set_audio(main_audio)
                 
@@ -248,6 +235,80 @@ class AutoClipPipeline:
 
                 output_filename = os.path.join(batch_dir, f"batch_{i+1}.mp4")
                 print(f"[{datetime.now()}] Writing final video to {output_filename}")
+
+                if progress_callback:
+                    progress_callback(0.95, f"Batch {i+1}: Encoding final video (this may take a while)...")
+                
+                # Prepare subtitle filter args
+                # Use forward slashes and ensure absolute path for filter
+                srt_abspath = os.path.abspath(srt_path)
+                
+                print(f"\n[{datetime.now()}] --- Subtitle Debug Info ---")
+                print(f"Environment: {os.name} (posix=Linux/Mac, nt=Windows)")
+                print(f"Original SRT Path: {srt_path}")
+                print(f"Absolute SRT Path: {srt_abspath}")
+                
+                if os.path.exists(srt_abspath):
+                    print(f"SRT File Exists. Size: {os.path.getsize(srt_abspath)} bytes")
+                else:
+                    print(f"CRITICAL: SRT file does NOT exist at {srt_abspath}")
+
+                # Default to original
+                final_srt_path = srt_abspath
+
+                # Apply offset to align subtitles (User requested "slower"/later)
+                # Shifting by -0.5 seconds to appear EARLIER (counteract lag)
+                SHIFT_SECONDS = -0.5
+                try:
+                    print(f"[{datetime.now()}] Applying {SHIFT_SECONDS}s shift to subtitles (Advanced/Earlier)...")
+                    
+                    # Open the ORIGINAL (or current) SRT to shift it
+                    subs_obj = pysrt.open(srt_abspath)
+                    subs_obj.shift(seconds=SHIFT_SECONDS)
+                    
+                    shifted_srt_name = f"shifted_{os.path.basename(srt_path)}"
+                    shifted_srt_path = os.path.join(batch_dir, shifted_srt_name)
+                    subs_obj.save(shifted_srt_path, encoding='utf-8')
+                    
+                    final_srt_path = os.path.abspath(shifted_srt_path)
+                    print(f"[{datetime.now()}] Subtitles shifted. Using NEW SRT file: {final_srt_path}")
+                except Exception as e:
+                    print(f"[{datetime.now()}] Error shifting subtitles: {e}")
+                    print(f"[{datetime.now()}] Fallback to ORIGINAL SRT: {final_srt_path}")
+
+                # Path formatting for FFmpeg 'subtitles' filter
+                # 1. Normalize slashes to forward slashes (works on both Linux and Windows for FFmpeg)
+                srt_filter_path = final_srt_path.replace('\\', '/')
+                
+                # 2. Handle Windows drive letters specifically
+                if os.name == 'nt':
+                    # On Windows, 'C:/' -> 'C\:/' for filter escaping
+                    srt_filter_path = srt_filter_path.replace(':', '\\:')
+                
+                print(f"Escaped Path for Filter: {srt_filter_path}")
+                
+                # NOTE: Fontname with spaces can be tricky. We escape spaces with backslash just in case.
+                # 'Noto Sans CJK SC' -> 'Noto\ Sans\ CJK\ SC'
+                font_name = "Noto Sans CJK SC"
+                font_name_escaped = font_name.replace(" ", r"\ ")
+                
+                # Improved style settings for "Movie Standard":
+                # FontSize=45 (Refined size)
+                # MarginV=60 (Clear layout)
+                # PrimaryColour=&H00FFFFFF (Opaque White)
+                # Outline=2, Shadow=1 (Cinematic contrast)
+                # Alignment=2 (Bottom Center)
+                style_str = (
+                    f"Fontname={font_name_escaped},FontSize=9,"
+                    "PrimaryColour=&H00FFFFFF,Outline=1,Shadow=1,MarginV=15,Alignment=2,Bold=1"
+                )
+
+                ffmpeg_params = [
+                    '-vf', 
+                    f"subtitles='{srt_filter_path}':force_style='{style_str}'"
+                ]
+                print(f"Final ffmpeg_params output: {ffmpeg_params}")
+                print(f"---------------------------------\n")
                 
                 # Write file
                 final_video.write_videofile(
@@ -256,7 +317,8 @@ class AutoClipPipeline:
                     codec='libx264', 
                     audio_codec='aac',
                     threads=4,
-                    logger=None 
+                    logger=None,
+                    ffmpeg_params=ffmpeg_params
                 )
                 generated_files.append(output_filename)
                 
@@ -265,6 +327,9 @@ class AutoClipPipeline:
                 for c in clip_objects:
                     c.close()
                 if 'final_video' in locals(): final_video.close()
-                if 'main_audio' in locals(): main_audio.close()
+                # Do NOT close main_audio here, it's shared across batches!
+
+        # Cleanup shared resources
+        if 'main_audio' in locals(): main_audio.close()
 
         return generated_files
