@@ -32,6 +32,45 @@ else:
     # TikTok / Shorts default
     vid_width, vid_height = 1080, 1920
 
+st.sidebar.divider()
+st.sidebar.header("🛠️ 素材预处理 (工具)")
+prep_ratio = st.sidebar.selectbox(
+    "预处理目标比例",
+    ["抖音 (9:16)", "Youtube (16:9)", "自定义"],
+    index=0,
+    key="prep_ratio_select"
+)
+
+prep_w, prep_h = 1080, 1920
+if prep_ratio == "自定义":
+    prep_w = st.sidebar.number_input("宽", min_value=100, value=1080, step=10, key="prep_w")
+    prep_h = st.sidebar.number_input("高", min_value=100, value=1920, step=10, key="prep_h")
+elif "16:9" in prep_ratio:
+    prep_w, prep_h = 1920, 1080
+else:
+    # 9:16
+    prep_w, prep_h = 1080, 1920
+
+if st.sidebar.button("⚙️ 一键预处理素材"):
+    from src.preprocessor import preprocess_videos
+    
+    status_bar = st.sidebar.progress(0)
+    status_text = st.sidebar.empty()
+    
+    def on_prep_progress(p, msg):
+        status_bar.progress(p)
+        status_text.text(msg)
+        
+    try:
+        # ASSETS_DIR is defined above in the file (line 13)
+        count, msg = preprocess_videos(ASSETS_DIR, (prep_w, prep_h), on_prep_progress)
+        st.sidebar.success(f"完成! 共处理 {count} 个文件")
+        time.sleep(1)
+        status_text.empty()
+        status_bar.empty()
+    except Exception as e:
+        st.sidebar.error(f"出错: {e}")
+
 # Main Area
 col1, col2 = st.columns([1, 1])
 
