@@ -84,7 +84,8 @@ def generate_srt(audio_file: str, output_srt: str) -> None:
                 ts_idx += 1
         
         # Split condition
-        if char in "。？！.?!":
+        # Update: Split on commas and semi-colons/colons to prevent long lines
+        if char in "，。？！、；：,.?!;:":
             if start_time is not None and end_time is not None:
                 segments.append({
                     "start": start_time,

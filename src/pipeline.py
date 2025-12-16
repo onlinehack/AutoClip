@@ -56,45 +56,8 @@ class AutoClipPipeline:
         subs = pysrt.open(srt_path)
         print(f"[{datetime.now()}] SRT loaded. {len(subs)} subtitles.")
         
-        # Create continuous segments (Text + Gaps)
-        segments = []
-        current_time = 0.0
-        
-        for sub in subs:
-            start_seconds = sub.start.ordinal / 1000.0
-            end_seconds = sub.end.ordinal / 1000.0
-            text = sub.text
-            
-            # Gap before?
-            if start_seconds > current_time + 0.1: # Threshold for gap
-                 gap_dur = start_seconds - current_time
-                 segments.append({
-                     "start": current_time,
-                     "end": start_seconds,
-                     "duration": gap_dur,
-                     "text": ""
-                 })
-                 
-            # Subtitle Segment
-            dur = end_seconds - start_seconds
-            if dur > 0:
-                segments.append({
-                    "start": start_seconds,
-                    "end": end_seconds,
-                    "duration": dur,
-                    "text": text
-                })
-            current_time = end_seconds
-            
-        # Final gap
-        if current_time < total_duration:
-            gap_dur = total_duration - current_time
-            segments.append({
-                "start": current_time,
-                "end": total_duration,
-                "duration": gap_dur,
-                "text": ""
-            })
+        # Old segments logic removed.
+
 
         generated_files = []
 
@@ -133,74 +96,71 @@ class AutoClipPipeline:
             
             part_files = []
             
+            # Create render tasks from timeline_blocks
+            # Subdivide blocks to avoid huge memory usage
+            MAX_CHUNK_DURATION = 15.0 
+            render_tasks = []
+            
+            for block in timeline_blocks:
+                b_start = block["start"]
+                b_end = block["end"]
+                folder = block["folder"]
+                
+                curr = b_start
+                while curr < b_end:
+                    next_t = min(curr + MAX_CHUNK_DURATION, b_end)
+                    render_tasks.append({
+                        "start": curr,
+                        "end": next_t,
+                        "folder": folder,
+                        "duration": next_t - curr
+                    })
+                    curr = next_t
+
             batch_start_time = time.time()
             last_step_time = time.time()
             
-            for idx, seg in enumerate(segments):
+            for idx, task in enumerate(render_tasks):
                 current_time = time.time()
                 elapsed = current_time - batch_start_time
                 step_dur = current_time - last_step_time if idx > 0 else 0
                 last_step_time = current_time
                 
-                msg = f"Batch {i+1}: Rendering part {idx+1}/{len(segments)} | Elapsed: {elapsed:.1f}s"
+                msg = f"Batch {i+1}: Rendering part {idx+1}/{len(render_tasks)} | Elapsed: {elapsed:.1f}s"
                 if idx > 0:
                     msg += f" (Last: {step_dur:.1f}s)"
                     
                 if progress_callback:
-                    progress_callback(0.2 + 0.6 * (idx / len(segments)), msg)
+                    progress_callback(0.2 + 0.6 * (idx / len(render_tasks)), msg)
 
-                print(f"[{datetime.now()}] Processing segment {idx+1}/{len(segments)} | {msg}")
+                print(f"[{datetime.now()}] Processing chunk {idx+1}/{len(render_tasks)} [{task['start']:.2f}-{task['end']:.2f}] | {msg}")
                 
-                seg_start = seg["start"]
-                seg_end = seg["end"]
-                duration = seg["duration"]
+                chunk_start = task["start"]
+                chunk_end = task["end"]
+                duration = task["duration"]
+                folder = task["folder"]
                 
-                # Determine folder
-                mid_point = (seg_start + seg_end) / 2
-                selected_folder = None
-                for block in timeline_blocks:
-                    if block["start"] <= mid_point < block["end"]:
-                        selected_folder = block["folder"]
-                        break
-                
-                if not selected_folder and timeline_blocks:
-                     selected_folder = timeline_blocks[-1]["folder"]
-                
-                # Get Video Clip
                 try:
+                    # Get Video Clip
                     video_clip = None
-                    if selected_folder:
-                        print(f"[{datetime.now()}] Getting clip from folder: {os.path.basename(selected_folder)}")
-                        video_clip = self.matcher.get_ordered_clip(selected_folder, duration)
+                    if folder:
+                        print(f"[{datetime.now()}] Getting clip from folder: {os.path.basename(folder)}")
+                        video_clip = self.matcher.get_ordered_clip(folder, duration)
 
                     if not video_clip:
                          # Fallback to color clip
-                         print(f"[{datetime.now()}] Warning: No video found for segment {idx}, using black placeholder.")
+                         print(f"[{datetime.now()}] Warning: No video found for chunk {idx}, using black placeholder.")
                          video_clip = ColorClip(size=(config.width, config.height), color=(0,0,0), duration=duration)
-                    else:
-                         # Resize/Crop
-                         # print(f"[{datetime.now()}] Resizing clip...")
-                         video_clip = self.matcher.resize_and_crop(video_clip, (config.width, config.height))
+                    # else:
+                    #     video_clip = self.matcher.resize_and_crop(video_clip, (config.width, config.height))
                     
-                    # Important: video_clip.set_duration just in case
                     video_clip = video_clip.set_duration(duration)
                     
-                    # Add Subtitle if text exists
-                    final_seg_clip = video_clip
-                    if seg["text"].strip():
-                        subtitle_clip = create_subtitle_clip(
-                            seg["text"], 
-                            duration=duration, 
-                            size=(config.width, config.height)
-                        )
-                        final_seg_clip = CompositeVideoClip([video_clip, subtitle_clip])
-                    
-                    # RENDER PART IMMEDIATELY
+                    # RENDER PART IMMEDIATELY (VIDEO ONLY)
                     part_file = os.path.join(temp_parts_dir, f"part_{idx:04d}.mp4")
-                    print(f"[{datetime.now()}] Rendering part to {part_file}...")
+                    print(f"[{datetime.now()}] Rendering video part to {part_file}...")
                     
-                    # Use faster preset for parts, we will re-encode final
-                    final_seg_clip.write_videofile(
+                    video_clip.write_videofile(
                         part_file, 
                         fps=24, 
                         codec='libx264',
@@ -208,21 +168,18 @@ class AutoClipPipeline:
                         preset='ultrafast',
                         logger=None
                     )
-                    print(f"[{datetime.now()}] Part {idx} rendered.")
                     
                     part_files.append(part_file)
                     
                     # CLEANUP
-                    del final_seg_clip
-                    if 'video_clip' in locals(): del video_clip
-                    if 'subtitle_clip' in locals(): del subtitle_clip
+                    video_clip.close()
+                    del video_clip
                     
                     import gc
                     gc.collect()
-                    print(f"[{datetime.now()}] Memory cleanup done for segment {idx}.")
                     
                 except Exception as e:
-                    print(f"[{datetime.now()}] Error processing segment {idx}: {e}")
+                    print(f"[{datetime.now()}] Error processing chunk {idx}: {e}")
                     raise e
 
             # Concatenate Parts
@@ -252,6 +209,28 @@ class AutoClipPipeline:
                      print(f"[{datetime.now()}] Video ({final_video_visual.duration}s) < Audio ({final_duration}s). Padding video (or letting it hold).")
                      final_video_visual = final_video_visual.set_duration(final_duration)
                      
+                # Overlay Subtitles Globally
+                print(f"[{datetime.now()}] Generating global subtitle overlay...")
+                subtitle_clips = []
+                for sub in subs:
+                    s_start = sub.start.ordinal / 1000.0
+                    s_end = sub.end.ordinal / 1000.0
+                    s_dur = s_end - s_start
+                    
+                    if s_dur > 0 and sub.text.strip():
+                        # We use the full duration for the clip, but set start time
+                        txt = create_subtitle_clip(
+                            sub.text, 
+                            duration=s_dur, 
+                            size=(config.width, config.height)
+                        ).set_start(s_start)
+                        subtitle_clips.append(txt)
+                
+                if subtitle_clips:
+                    # Use CompositeVideoClip to overlay text on video
+                    # Note: We must ensure the video is the first element (layer 0)
+                    final_video_visual = CompositeVideoClip([final_video_visual] + subtitle_clips)
+
                 final_video = final_video_visual.set_audio(main_audio)
                 
                 # Add BGM
