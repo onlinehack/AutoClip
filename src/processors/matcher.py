@@ -95,6 +95,7 @@ class Matcher:
     def resize_and_crop(self, clip: VideoFileClip, target_size: tuple) -> VideoFileClip:
         """
         Resize and center crop the clip to fill target_size.
+        Uses scalar scaling to strictly preserve aspect ratio.
         """
         w, h = clip.size
         target_w, target_h = target_size
@@ -103,22 +104,14 @@ class Matcher:
         if w == target_w and h == target_h:
             return clip
         
-        # Calculate aspect ratios
-        aspect_ratio = w / h
-        target_aspect = target_w / target_h
+        # Calculate scale factor needed to cover the target area
+        scale_factor = max(target_w / w, target_h / h)
         
-        if aspect_ratio > target_aspect:
-            # Video is wider than target, resize by height
-            new_h = target_h
-            new_w = int(w * (target_h / h))
-            clip = clip.resize(height=new_h)
-        else:
-            # Video is taller/narrower than target, resize by width
-            new_w = target_w
-            new_h = int(h * (target_w / w))
-            clip = clip.resize(width=new_w)
+        # Resize using a single scalar to strictly preserve aspect ratio
+        clip = clip.resize(scale_factor)
             
         # Center crop
+        # Note: clip.w and clip.h are updated after resize
         clip = clip.crop(width=target_w, height=target_h, x_center=clip.w/2, y_center=clip.h/2)
         
         return clip

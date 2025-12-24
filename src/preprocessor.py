@@ -1,106 +1,100 @@
 import os
-from moviepy.editor import VideoFileClip
-
-def resize_and_crop(clip, target_size):
-    """
-    Resize and crop the video clip to strictly match target_size.
-    Logic helps maintain aspect ratio.
-    """
-    w, h = clip.size
-    target_w, target_h = target_size
-    
-    # If dimensions match exactly, return original
-    if w == target_w and h == target_h:
-        return clip
-    
-    aspect_ratio = w / h
-    target_aspect = target_w / target_h
-    
-    if aspect_ratio > target_aspect:
-        # Video is wider than target, resize by height
-        new_h = target_h
-        new_w = int(w * (target_h / h))
-        clip = clip.resize(height=new_h)
-    else:
-        # Video is taller/narrower, resize by width
-        new_w = target_w
-        new_h = int(h * (target_w / w))
-        clip = clip.resize(width=new_w)
-        
-    # Center crop
-    clip = clip.crop(width=target_w, height=target_h, x_center=clip.w/2, y_center=clip.h/2)
-    return clip
-
+import subprocess
+import json
 import concurrent.futures
 import multiprocessing
+import shutil
+
+def get_video_info(file_path):
+    """
+    Get video width and height using ffprobe.
+    Returns: (width, height)
+    """
+    try:
+        cmd = [
+            "ffprobe", 
+            "-v", "error", 
+            "-select_streams", "v:0", 
+            "-show_entries", "stream=width,height", 
+            "-of", "json", 
+            file_path
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        data = json.loads(result.stdout)
+        stream = data["streams"][0]
+        return int(stream["width"]), int(stream["height"])
+    except Exception as e:
+        print(f"Error reading info for {file_path}: {e}")
+        return None
 
 def process_single_video_task(args):
     """
-    Worker task for processing a single video.
+    Worker task for processing a single video using FFmpeg directly.
     args: (v_path, target_res)
     Returns: (success_bool, v_path_or_error_msg)
     """
     v_path, target_res = args
     temp_path = v_path + ".temp.mp4"
-    clip = None
-    new_clip = None
     
     try:
-        clip = VideoFileClip(v_path)
-        w, h = clip.size
-        # Unpack target res
+        # 1. Check current dimensions
+        info = get_video_info(v_path)
+        if not info:
+            return False, f"{v_path}: Could not read metadata"
+            
+        w, h = info
         tw, th = target_res
         
         # Skip if already correct dimensions
         if w == tw and h == th:
-            clip.close()
             return True, None # Skipped/Success
-            
-        new_clip = resize_and_crop(clip, target_res)
         
-        # Write to temp file
-        # Lower threads per process since we are running multiple processes
-        fps = clip.fps if clip.fps else 30
+        # 2. Construct FFmpeg command
+        # Logic: Scale to cover (increase), then Crop center.
+        # efficient logic: scale=w=TARGET_W:h=TARGET_H:force_original_aspect_ratio=increase,crop=TARGET_W:TARGET_H
+        vf_filter = f"scale=w={tw}:h={th}:force_original_aspect_ratio=increase,crop={tw}:{th}:x=(in_w-{tw})/2:y=(in_h-{th})/2"
         
-        new_clip.write_videofile(
-            temp_path,
-            fps=fps,
-            codec='libx264',
-            audio_codec='aac',
-            preset='ultrafast', 
-            logger=None,
-            threads=2  # Reduced threads per worker to avoid oversubscription
-        )
+        cmd = [
+            "ffmpeg",
+            "-y",                # Overwrite output
+            "-i", v_path,
+            "-vf", vf_filter,
+            "-c:v", "libx264",
+            "-preset", "ultrafast",   # Speed priority
+            "-crf", "23",
+            "-c:a", "aac",            # Encode audio
+            "-b:a", "128k",
+            "-threads", "2",          # Limit threads per process to allow higher parallelism
+            "-loglevel", "error",     # Quiet output
+            temp_path
+        ]
         
-        # cleanup
-        new_clip.close()
-        clip.close()
+        # Run FFmpeg
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         
-        # Replace file
+        # 3. Replace file
         if os.path.exists(v_path):
             os.remove(v_path)
         os.rename(temp_path, v_path)
         
         return True, v_path
         
-    except Exception as e:
-        # cleanup on error
-        if clip: 
-            try: clip.close() 
-            except: pass
-        if new_clip: 
-            try: new_clip.close() 
-            except: pass
+    except subprocess.CalledProcessError as e:
+        stderr_output = e.stderr.decode() if e.stderr else "Unknown error"
         if os.path.exists(temp_path):
             try: os.remove(temp_path)
             except: pass
-            
+        return False, f"{v_path}: FFmpeg failed - {stderr_output}"
+    except Exception as e:
+        if os.path.exists(temp_path):
+            try: os.remove(temp_path)
+            except: pass
         return False, f"{v_path}: {str(e)}"
 
 def preprocess_videos(assets_dir, target_res, progress_callback=None):
     """
     Recursively find all mp4 files in assets_dir/video and resize/crop them to target_res.
-    Uses parallel processing to utilize multi-core CPUs (Xeon friendly).
+    Uses parallel FFmpeg processes to utilize multi-core CPUs (Xeon friendly).
     """
     video_root = os.path.join(assets_dir, "video")
     if not os.path.exists(video_root):
@@ -119,17 +113,30 @@ def preprocess_videos(assets_dir, target_res, progress_callback=None):
         
     processed_count = 0
     
-    # Determine number of workers
-    # Leave some cores for the system, but utilize most.
-    # For Xeon, cpu_count can be high (e.g. 24).
-    # We don't want to spawn too many ffmpeg instances if memory is tight, 
-    # but generally 50-75% of cores is safe for video encoding if RAM permits.
+    # Determine number of workers for Xeon / Multi-core
+    # We use independent FFmpeg processes.
+    # Each FFmpeg is set to use 2 threads.
+    # We can aim for roughly (Total Threads) concurrent FFmpegs, or slightly less for IO safety.
+    # For a Xeon with say 48 threads, we can run 20-24 workers.
+    
     cpu_count = multiprocessing.cpu_count()
-    max_workers = max(1, cpu_count - 2) # Leave 2 cores free
+    
+    # Strategy: Assign roughly 1 worker per 2 logical cores, assuming FFmpeg takes ~200% CPU.
+    # Reserve slight overhead.
+    max_workers = max(1, int(cpu_count / 2)) 
+    
     # Cap workers if file count is small
     max_workers = min(max_workers, total)
     
-    print(f"Starting preprocessing with {max_workers} workers parallel processing...")
+    # Hard limit to avoid OS file handle exhaustion or extreme IO saturation (e.g. 32 concurrent writes might be HDD bottleneck)
+    # 16 is a safe sweet spot for fast SSDs. For RAID/Nvme on Server maybe 32.
+    # Let's cap at 16 to be safe unless user asks for more. 
+    # Actually wait, user has Xeon server. They might have NVMe. 
+    # Let's trust the CPU count but cap at 20 to be safe on IO.
+    if max_workers > 24:
+        max_workers = 24
+        
+    print(f"Starting preprocessing with {max_workers} concurrent FFmpeg workers...")
 
     with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
         # Submit all tasks
@@ -146,8 +153,7 @@ def preprocess_videos(assets_dir, target_res, progress_callback=None):
             # Update progress
             if progress_callback:
                 progress = (i + 1) / total
-                # Use result_data (path) if success, or just generic message
-                msg = f"Processing {(i + 1)}/{total}"
+                msg = f"Processing {(i + 1)}/{total} | Workers: {max_workers}"
                 progress_callback(progress, msg)
     
     if progress_callback:
