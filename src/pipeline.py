@@ -24,6 +24,8 @@ class AutoClipPipeline:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         batch_dir = os.path.join(self.output_dir, f"{timestamp}_Batch")
         os.makedirs(batch_dir, exist_ok=True)
+        print(f"[{datetime.now()}] [Pipeline] Output Directory: {batch_dir}")
+        print(f"[{datetime.now()}] [Pipeline] Config: BatchCount={config.batch_count}, Resolution={config.width}x{config.height}")
         
         # Determine SRT path
         srt_path = config.srt_path
@@ -32,30 +34,31 @@ class AutoClipPipeline:
             if progress_callback:
                 progress_callback(0.05, "Auto-generating Subtitles (FunASR)...")
             
-            print(f"[{datetime.now()}] Starting ASR generation...")
+            print(f"[{datetime.now()}] [Pipeline] ASR start for {config.audio_path}...")
             srt_name = f"generated_{timestamp}.srt"
             srt_path = os.path.join(batch_dir, srt_name)
+            srt_path = os.path.join(batch_dir, srt_name)
             generate_srt(config.audio_path, srt_path)
-            print(f"[{datetime.now()}] ASR generation completed. Memory cleanup should be done.")
+            print(f"[{datetime.now()}] [Pipeline] ASR completed. Output: {srt_path}")
             
         # Load Audio
         time.sleep(1) # Give system a moment
         if progress_callback:
             progress_callback(0.1, "Loading Assets...")
             
-        print(f"[{datetime.now()}] Loading AudioFileClip: {config.audio_path}")
+        print(f"[{datetime.now()}] [Pipeline] Validating Audio Duration: {config.audio_path}")
         try:
-            main_audio = AudioFileClip(config.audio_path)
-            total_duration = main_audio.duration
-            print(f"[{datetime.now()}] Audio loaded. Duration: {total_duration}s")
+            with AudioFileClip(config.audio_path) as temp_audio:
+                total_duration = temp_audio.duration
+            print(f"[{datetime.now()}] Audio duration: {total_duration}s")
         except Exception as e:
             print(f"[{datetime.now()}] Error loading audio: {e}")
             raise e
         
         # Load SRT
-        print(f"[{datetime.now()}] Loading SRT: {srt_path}")
+        print(f"[{datetime.now()}] [Pipeline] Loading SRT: {srt_path}")
         subs = pysrt.open(srt_path)
-        print(f"[{datetime.now()}] SRT loaded. {len(subs)} subtitles.")
+        print(f"[{datetime.now()}] [Pipeline] SRT loaded. {len(subs)} lines.")
         
         # Old segments logic removed.
 
@@ -63,6 +66,11 @@ class AutoClipPipeline:
         generated_files = []
 
         for i in range(config.batch_count):
+            print(f"[{datetime.now()}] [Pipeline] === Starting Batch {i+1}/{config.batch_count} ===")
+            
+            # Reload audio for each batch to ensure fresh file handles
+            main_audio = AudioFileClip(config.audio_path)
+            
             batch_metadata = []
             if progress_callback:
                 progress_callback(0.2, f"Batch {i+1}: Planning Timeline...")
@@ -91,6 +99,8 @@ class AutoClipPipeline:
             # Ensure last block covers floating point errors
             if timeline_blocks:
                 timeline_blocks[-1]["end"] = max(total_duration, timeline_blocks[-1]["end"])
+            
+            print(f"[{datetime.now()}] [Pipeline] Timeline planned with {len(timeline_blocks)} blocks.")
 
             # 2. Assemble Video Tracks - RENDER CHUNKS IMMEDIATELY TO AVOID OOM
             temp_parts_dir = os.path.join(batch_dir, "parts")
@@ -135,7 +145,7 @@ class AutoClipPipeline:
                 if progress_callback:
                     progress_callback(0.2 + 0.6 * (idx / len(render_tasks)), msg)
 
-                print(f"[{datetime.now()}] Processing chunk {idx+1}/{len(render_tasks)} [{task['start']:.2f}-{task['end']:.2f}] | {msg}")
+                print(f"[{datetime.now()}] [Pipeline] [Batch {i+1}] Rendering Chunk {idx+1}/{len(render_tasks)}: {task['start']:.2f}s - {task['end']:.2f}s (Dur: {task['duration']:.2f}s)")
                 
                 chunk_start = task["start"]
                 chunk_end = task["end"]
@@ -146,7 +156,7 @@ class AutoClipPipeline:
                     # Get Video Clip
                     video_clip = None
                     if folder:
-                        print(f"[{datetime.now()}] Getting clip from folder: {os.path.basename(folder)}")
+                        print(f"[{datetime.now()}] [Pipeline] Searching clip in: {os.path.basename(folder)}")
                         video_clip, segment_meta = self.matcher.get_ordered_clip(folder, duration)
                         
                         if video_clip:
@@ -198,7 +208,7 @@ class AutoClipPipeline:
             if not part_files:
                 continue
                 
-            print(f"[{datetime.now()}] Concatenating {len(part_files)} parts...")
+            print(f"[{datetime.now()}] [Pipeline] All chunks rendered. Concatenating {len(part_files)} parts...")
             
             # Load all parts
             # Logic: If we load 50 VideoFileClips, do we crash?
@@ -246,7 +256,8 @@ class AutoClipPipeline:
                         final_video = final_video.set_audio(final_audio)
 
                 output_filename = os.path.join(batch_dir, f"batch_{i+1}.mp4")
-                print(f"[{datetime.now()}] Writing final video to {output_filename}")
+                print(f"[{datetime.now()}] [Pipeline] Saving Final Video to {output_filename}")
+                print(f"[{datetime.now()}] [Pipeline] This step includes FFmpeg encoding and burning subtitles. Please wait...")
 
                 if progress_callback:
                     progress_callback(0.95, f"Batch {i+1}: Encoding final video (this may take a while)...")
@@ -338,6 +349,7 @@ class AutoClipPipeline:
                     logger=None,
                     ffmpeg_params=ffmpeg_params
                 )
+                print(f"[{datetime.now()}] [Pipeline] Video encoding finished: {output_filename}")
                 generated_files.append(output_filename)
                 
                 # Save Metadata
@@ -354,9 +366,9 @@ class AutoClipPipeline:
                 for c in clip_objects:
                     c.close()
                 if 'final_video' in locals(): final_video.close()
-                # Do NOT close main_audio here, it's shared across batches!
+                if 'main_audio' in locals(): main_audio.close()
 
         # Cleanup shared resources
-        if 'main_audio' in locals(): main_audio.close()
+
 
         return generated_files

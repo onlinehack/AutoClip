@@ -1,5 +1,6 @@
 import os
 import math
+from datetime import datetime
 from funasr import AutoModel
 
 def format_time(ms):
@@ -15,7 +16,7 @@ def generate_srt(audio_file: str, output_srt: str) -> None:
     """
     Generate SRT file from audio using FunASR.
     """
-    print(f"Loading FunASR model for {audio_file}...")
+    print(f"[{datetime.now()}] [ASR] Loading FunASR model for {audio_file}...")
     try:
         model = AutoModel(
             model="paraformer-zh",
@@ -23,19 +24,21 @@ def generate_srt(audio_file: str, output_srt: str) -> None:
             punc_model="ct-punc",
             log_level="ERROR"
         )
+        print(f"[{datetime.now()}] [ASR] Model loaded.")
     except Exception as e:
-        print(f"Error loading FunASR model: {e}")
+        print(f"[{datetime.now()}] [ASR] Error loading FunASR model: {e}")
         raise e
     
-    print("Running inference...")
+    
+    print(f"[{datetime.now()}] [ASR] Running inference...")
     try:
         res = model.generate(input=audio_file, batch_size_s=300)
     except Exception as e:
-        print(f"Error running inference: {e}")
+        print(f"[{datetime.now()}] [ASR] Error running inference: {e}")
         raise e
     
     if not res:
-        print("Warning: No result from ASR.")
+        print(f"[{datetime.now()}] [ASR] Warning: No result from ASR.")
         with open(output_srt, 'w', encoding='utf-8') as f:
             pass
         return
@@ -113,10 +116,10 @@ def generate_srt(audio_file: str, output_srt: str) -> None:
             clean_text = seg['text'].translate(str.maketrans('', '', "，。？！、；：,.?!;:"))
             f.write(f"{clean_text}\n\n")
             
-    print(f"SRT generated at {output_srt}")
+    print(f"[{datetime.now()}] [ASR] SRT generated at {output_srt} ({len(segments)} segments)")
     
     # Cleanup memory
-    print("Cleaning up ASR model memory...")
+    print(f"[{datetime.now()}] [ASR] Cleaning up ASR model memory...")
     del model
     import gc
     import torch

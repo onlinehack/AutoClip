@@ -12,6 +12,9 @@ services:
       # Mount the entire project directory to /app for live code updates
       # This allows you to modify source code (src/, gui_app.py) without rebuilding
       - ../:/app
+      # Persist models
+      - ../models:/models
     environment:
       - TZ=Asia/Shanghai
+      - MODELSCOPE_CACHE=/models
     restart: unless-stopped

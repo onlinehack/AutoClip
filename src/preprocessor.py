@@ -50,9 +50,25 @@ def process_single_video_task(args):
             return True, None # Skipped/Success
         
         # 2. Construct FFmpeg command
-        # Logic: Scale to cover (increase), then Crop center.
-        # efficient logic: scale=w=TARGET_W:h=TARGET_H:force_original_aspect_ratio=increase,crop=TARGET_W:TARGET_H
-        vf_filter = f"scale=w={tw}:h={th}:force_original_aspect_ratio=increase,crop={tw}:{th}:x=(in_w-{tw})/2:y=(in_h-{th})/2"
+        # Logic: 
+        # - If Landscape (w > h): Fit inside (decrease), then Pad with black.
+        # - If Portrait/Square (w <= h): Fill (increase), then Crop center.
+        
+        if w > h:
+            # Landscape -> Letterbox (Pad)
+            # scale to fit inside target box, then pad with black to match target resolution
+            # pad=w:h:x:y:color
+            vf_filter = (
+                f"scale=w={tw}:h={th}:force_original_aspect_ratio=decrease,"
+                f"pad={tw}:{th}:(ow-iw)/2:(oh-ih)/2:black"
+            )
+        else:
+            # Portrait/Square -> Zoom to Fill (Crop)
+            # efficient logic: scale=w=TARGET_W:h=TARGET_H:force_original_aspect_ratio=increase,crop=TARGET_W:TARGET_H
+            vf_filter = (
+                f"scale=w={tw}:h={th}:force_original_aspect_ratio=increase,"
+                f"crop={tw}:{th}:x=(in_w-{tw})/2:y=(in_h-{th})/2"
+            )
         
         cmd = [
             "ffmpeg",
