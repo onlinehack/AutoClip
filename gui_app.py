@@ -3,7 +3,7 @@ import os
 import time
 from src.models import MixConfig, FolderWeight
 from src.pipeline import AutoClipPipeline
-from src.utils import get_subfolders
+from src.utils import get_subfolders, get_video_files
 
 st.set_page_config(page_title="AutoClip Studio", layout="wide")
 
@@ -109,12 +109,27 @@ with col1:
     
     bgm_selected = st.selectbox("背景音乐 (可选)", ["无 (None)"] + bgm_files)
 
+    with st.expander("字幕样式配置 (高级)"):
+        sub_font_name = st.text_input("字体名称", value="Noto Sans CJK SC")
+        c1, c2 = st.columns(2)
+        with c1:
+            sub_font_size = st.number_input("字体大小", value=9, min_value=1)
+            sub_outline = st.number_input("描边宽度", value=1, min_value=0)
+            sub_bold = st.checkbox("粗体", value=True)
+        with c2:
+            sub_color = st.color_picker("字体颜色", value="#FFFFFF")
+            sub_shadow = st.number_input("阴影深度", value=1, min_value=0)
+            sub_margin_v = st.number_input("垂直边距 (MarginV)", value=15, min_value=0)
+
 with col2:
     st.subheader("2. 视觉素材与权重")
     st.info("💡 顺序决定时间线流程。权重决定时长占比。")
     
     video_root = os.path.join(ASSETS_DIR, "video")
-    subfolders = get_subfolders(video_root)
+    subfolders = [
+        f for f in get_subfolders(video_root) 
+        if get_video_files(os.path.join(video_root, f))
+    ]
     
     folder_weights = []
     if not subfolders:
@@ -166,7 +181,14 @@ if st.button("🎬 开始生成", type="primary"):
             batch_count=batch_count,
             bgm_file=None if bgm_selected == "无 (None)" else bgm_selected,
             width=vid_width,
-            height=vid_height
+            height=vid_height,
+            subtitle_font_name=sub_font_name,
+            subtitle_font_size=sub_font_size,
+            subtitle_color=sub_color,
+            subtitle_outline=sub_outline,
+            subtitle_shadow=sub_shadow,
+            subtitle_margin_v=sub_margin_v,
+            subtitle_bold=sub_bold
         )
         
         # Run Pipeline

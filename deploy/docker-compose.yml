@@ -9,10 +9,9 @@ services:
     ports:
       - "8501:8501"
     volumes:
-      # Mount assets folder to persist input media
-      - ../assets:/app/assets
-      # Mount output folder to persist generated videos
-      - ../output:/app/output
+      # Mount the entire project directory to /app for live code updates
+      # This allows you to modify source code (src/, gui_app.py) without rebuilding
+      - ../:/app
     environment:
       - TZ=Asia/Shanghai
     restart: unless-stopped

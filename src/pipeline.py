@@ -166,6 +166,7 @@ class AutoClipPipeline:
                         codec='libx264',
                         audio=False, 
                         preset='ultrafast',
+                        threads=8,
                         logger=None
                     )
                     
@@ -287,20 +288,26 @@ class AutoClipPipeline:
                 
                 print(f"Escaped Path for Filter: {srt_filter_path}")
                 
+                # Convert color from valid Hex #RRGGBB to ASS &H00BBGGRR
+                def hex_to_ass(hex_color):
+                    c = hex_color.lstrip('#')
+                    if len(c) == 6:
+                        r, g, b = c[0:2], c[2:4], c[4:6]
+                        # ASS format: &HAABBGGRR (AA=Alpha)
+                        return f"&H00{b}{g}{r}".upper()
+                    return "&H00FFFFFF"
+
+                primary_color_ass = hex_to_ass(config.subtitle_color)
+                
                 # NOTE: Fontname with spaces can be tricky. We escape spaces with backslash just in case.
-                # 'Noto Sans CJK SC' -> 'Noto\ Sans\ CJK\ SC'
-                font_name = "Noto Sans CJK SC"
+                font_name = config.subtitle_font_name
                 font_name_escaped = font_name.replace(" ", r"\ ")
                 
-                # Improved style settings for "Movie Standard":
-                # FontSize=45 (Refined size)
-                # MarginV=60 (Clear layout)
-                # PrimaryColour=&H00FFFFFF (Opaque White)
-                # Outline=2, Shadow=1 (Cinematic contrast)
-                # Alignment=2 (Bottom Center)
                 style_str = (
-                    f"Fontname={font_name_escaped},FontSize=9,"
-                    "PrimaryColour=&H00FFFFFF,Outline=1,Shadow=1,MarginV=15,Alignment=2,Bold=1"
+                    f"Fontname={font_name_escaped},FontSize={config.subtitle_font_size},"
+                    f"PrimaryColour={primary_color_ass},Outline={config.subtitle_outline},"
+                    f"Shadow={config.subtitle_shadow},MarginV={config.subtitle_margin_v},"
+                    f"Alignment=2,Bold={1 if config.subtitle_bold else 0}"
                 )
 
                 ffmpeg_params = [
@@ -316,7 +323,7 @@ class AutoClipPipeline:
                     fps=24, 
                     codec='libx264', 
                     audio_codec='aac',
-                    threads=4,
+                    threads=16,
                     logger=None,
                     ffmpeg_params=ffmpeg_params
                 )

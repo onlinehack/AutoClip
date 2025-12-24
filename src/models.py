@@ -13,3 +13,12 @@ class MixConfig(BaseModel):
     width: int = 1080
     height: int = 1920
     bgm_file: Optional[str] = None
+    
+    # Subtitle Configuration
+    subtitle_font_name: str = "Noto Sans CJK SC"
+    subtitle_font_size: int = 9
+    subtitle_color: str = "#FFFFFF"
+    subtitle_outline: int = 1
+    subtitle_shadow: int = 1
+    subtitle_margin_v: int = 15
+    subtitle_bold: bool = True
