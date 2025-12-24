@@ -13,6 +13,7 @@ class MixConfig(BaseModel):
     width: int = 1080
     height: int = 1920
     bgm_file: Optional[str] = None
+    output_tag: str = ""
     
     # Subtitle Configuration
     subtitle_font_name: str = "Noto Sans CJK SC"

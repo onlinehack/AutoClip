@@ -22,7 +22,15 @@ class AutoClipPipeline:
 
     def run(self, config: MixConfig, progress_callback=None):
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        batch_dir = os.path.join(self.output_dir, f"{timestamp}_Batch")
+        
+        folder_name = f"{timestamp}_Batch"
+        if config.output_tag:
+            # Join with underscore, make sure no weird characters
+            safe_tag = "".join(c for c in config.output_tag if c.isalnum() or c in ('_', '-')).strip()
+            if safe_tag:
+                folder_name = f"{safe_tag}_{folder_name}"
+                
+        batch_dir = os.path.join(self.output_dir, folder_name)
         os.makedirs(batch_dir, exist_ok=True)
         print(f"[{datetime.now()}] [Pipeline] Output Directory: {batch_dir}")
         print(f"[{datetime.now()}] [Pipeline] Config: BatchCount={config.batch_count}, Resolution={config.width}x{config.height}")

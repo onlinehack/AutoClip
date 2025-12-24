@@ -20,6 +20,7 @@ DEFAULT_CONFIG = {
     "sub_shadow": 1,
     "sub_margin_v": 15,
     "bgm_selected": "无 (None)",
+    "output_tag": "",
     # Folder weights will be stored as a list of dicts or a dict: {"folder_name": weight}
     "folder_weights": {},
     "ordered_folders": [] 

@@ -62,6 +62,13 @@ batch_count = st.sidebar.number_input(
     key="batch_count"
 )
 
+output_tag = st.sidebar.text_input(
+    "输出文件夹标签 (可选)", 
+    value=config.get("output_tag", ""),
+    help="生成的文件夹名将以此作为前缀",
+    key="output_tag"
+)
+
 st.sidebar.subheader("视频分辨率")
 res_options = ["抖音 / Reels (1080x1920)", "Shorts (1080x1920)", "自定义"]
 res_option = st.sidebar.selectbox(
@@ -262,7 +269,8 @@ if st.button("🎬 开始生成", type="primary"):
             subtitle_outline=sub_outline,
             subtitle_shadow=sub_shadow,
             subtitle_margin_v=sub_margin_v,
-            subtitle_bold=sub_bold
+            subtitle_bold=sub_bold,
+            output_tag=output_tag
         )
         
         # Run Pipeline
@@ -319,6 +327,7 @@ if st.session_state.get('save_config_requested'):
         "prep_custom_w": st.session_state.get("prep_custom_w", 1080),
         "prep_custom_h": st.session_state.get("prep_custom_h", 1920),
         "bgm_selected": st.session_state.get("bgm_selected"),
+        "output_tag": st.session_state.get("output_tag", ""),
         # Subtitles
         "sub_font_name": st.session_state.get("sub_font_name"),
         "sub_font_size": st.session_state.get("sub_font_size"),
