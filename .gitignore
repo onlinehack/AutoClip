@@ -16,3 +16,4 @@ assets/
 # Project specific
 output/
 temp_uploads/
+user_config.json

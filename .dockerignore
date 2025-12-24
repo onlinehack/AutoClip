@@ -13,3 +13,4 @@ deploy/
 __pycache__/
 *.pyc
 temp_uploads/
+user_config.json

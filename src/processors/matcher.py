@@ -20,7 +20,7 @@ class Matcher:
                 'current_time': 0.0
             }
 
-    def get_ordered_clip(self, folder_path: str, target_duration: float) -> Optional[VideoFileClip]:
+    def get_ordered_clip(self, folder_path: str, target_duration: float):
         """
         Get the next chunk of video from the folder's sequence.
         Seamlessly transitions to the next video if the current one ends.
@@ -33,6 +33,7 @@ class Matcher:
             return None
 
         clips_to_concat = []
+        segments_used = []
         remaining_duration = target_duration
 
         # Prevent infinite loops if all videos are broken or 0 duration (safety break)
@@ -67,6 +68,13 @@ class Matcher:
                 sub = full_clip.subclip(start_t, start_t + take_time)
                 clips_to_concat.append(sub)
                 
+                segments_used.append({
+                    "source_file": video_path,
+                    "source_start": start_t,
+                    "source_end": start_t + take_time,
+                    "duration": take_time
+                })
+                
                 # Update State
                 state['current_time'] += take_time
                 remaining_duration -= take_time
@@ -85,12 +93,12 @@ class Matcher:
             loop_guard += 1
 
         if not clips_to_concat:
-            return None
+            return None, []
             
         if len(clips_to_concat) == 1:
-            return clips_to_concat[0]
+            return clips_to_concat[0], segments_used
         else:
-            return concatenate_videoclips(clips_to_concat)
+            return concatenate_videoclips(clips_to_concat), segments_used
 
     def resize_and_crop(self, clip: VideoFileClip, target_size: tuple) -> VideoFileClip:
         """

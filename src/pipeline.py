@@ -1,4 +1,5 @@
 import os
+import json
 import time
 import pysrt
 from datetime import datetime
@@ -62,6 +63,7 @@ class AutoClipPipeline:
         generated_files = []
 
         for i in range(config.batch_count):
+            batch_metadata = []
             if progress_callback:
                 progress_callback(0.2, f"Batch {i+1}: Planning Timeline...")
 
@@ -145,8 +147,17 @@ class AutoClipPipeline:
                     video_clip = None
                     if folder:
                         print(f"[{datetime.now()}] Getting clip from folder: {os.path.basename(folder)}")
-                        video_clip = self.matcher.get_ordered_clip(folder, duration)
-
+                        video_clip, segment_meta = self.matcher.get_ordered_clip(folder, duration)
+                        
+                        if video_clip:
+                            # Apply to metadata
+                            batch_metadata.append({
+                                "chunk_index": idx,
+                                "timeline_start": chunk_start,
+                                "timeline_end": chunk_end,
+                                "segments": segment_meta
+                            })
+                    
                     if not video_clip:
                          # Fallback to color clip
                          print(f"[{datetime.now()}] Warning: No video found for chunk {idx}, using black placeholder.")
@@ -328,6 +339,15 @@ class AutoClipPipeline:
                     ffmpeg_params=ffmpeg_params
                 )
                 generated_files.append(output_filename)
+                
+                # Save Metadata
+                meta_filename = output_filename.replace('.mp4', '_metadata.json')
+                try:
+                    with open(meta_filename, 'w', encoding='utf-8') as f:
+                        json.dump(batch_metadata, f, indent=2, ensure_ascii=False)
+                    print(f"[{datetime.now()}] Metadata saved to {meta_filename}")
+                except Exception as e:
+                    print(f"Error saving metadata: {e}")
                 
             finally:
                 # Close all clips
