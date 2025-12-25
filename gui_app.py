@@ -53,6 +53,7 @@ def render_queue_dataframe(placeholder):
                 "ID": t["id"],
                 "音频": t["audio_name"],
                 "字幕": t["srt_name"],
+                "转场": f"{t['trans_type'].split(' ')[0]} ({t['trans_dur']}s)" if "无" not in t['trans_type'] else "无",
                 "数量": t["count"],
                 "状态": t["status"]
             })
@@ -267,6 +268,13 @@ with col1:
         uploaded_srt = st.file_uploader("字幕文件 (可选, 留空自动生成)", type=['srt'], key=f"srt_{ukey}")
         task_count = st.number_input("生成数量", min_value=1, value=config.get("batch_count", 1), key=f"cnt_{ukey}")
         
+        st.markdown("**👉 转场设置 (Transition)**")
+        c_t1, c_t2 = st.columns(2)
+        with c_t1:
+            trans_type = st.selectbox("转场类型", ["无 (Hard Cut)", "叠化 (Crossfade)", "闪黑 (Fade to Black)"], index=0, key=f"tt_{ukey}")
+        with c_t2:
+            trans_dur = st.number_input("转场时长 (秒)", min_value=0.1, max_value=2.0, value=0.5, step=0.1, key=f"td_{ukey}", disabled=(trans_type=="无 (Hard Cut)"))
+
         submitted = st.form_submit_button("➕ 添加到队列")
         
         if submitted:
@@ -294,6 +302,8 @@ with col1:
                     "srt_name": srt_display,
                     "srt_path": srt_path,
                     "count": task_count,
+                    "trans_type": trans_type,
+                    "trans_dur": trans_dur,
                     "status": "Ready"
                 }
                 st.session_state['task_queue'].append(task_data)
@@ -360,7 +370,10 @@ if 'start_btn' in locals() and start_btn:
                 subtitle_shadow=sub_shadow,
                 subtitle_margin_v=sub_margin_v,
                 subtitle_bold=sub_bold,
-                output_tag=output_tag
+                output_tag=output_tag,
+                # Fix: Extract English key from "中文 (English)" format
+                transition_type=task.get('trans_type', "无").split("(")[-1].strip(")") if "(" in task.get('trans_type', "") else "None",
+                transition_duration=task.get('trans_dur', 0.5)
             )
             
             # Progress Callback wrapper

@@ -16,13 +16,38 @@ def generate_srt(audio_file: str, output_srt: str) -> None:
     """
     Generate SRT file from audio using FunASR.
     """
-    print(f"[{datetime.now()}] [ASR] Loading FunASR model for {audio_file}...")
+    import torch
+    import os
+    
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    
+    # Xeon/Multi-core Optimization
+    if device == "cpu":
+        try:
+            # Get core count (logical)
+            num_cores = os.cpu_count() or 4
+            # PyTorch often defaults to 1 or halves it on some systems. 
+            # We explicitly maximize it for Xeon.
+            # However, avoid excessive thread contention if cores > 32? 
+            # Usually strict setting to core count is safe for a single heavy task.
+            torch.set_num_threads(num_cores)
+            # interop threads handle parallelism between independent ops. 
+            # 2-4 is usually sufficient.
+            torch.set_num_interop_threads(4) 
+            
+            print(f"[{datetime.now()}] [ASR] CPU Optimization: Configured PyTorch to use {num_cores} threads (Device: {device}).")
+        except Exception as e:
+            print(f"[{datetime.now()}] [ASR] CPU Optimization Warning: {e}")
+
+    print(f"[{datetime.now()}] [ASR] Loading FunASR model using device: {device}...")
+
     try:
         model = AutoModel(
             model="paraformer-zh",
             vad_model="fsmn-vad",
             punc_model="ct-punc",
-            log_level="ERROR"
+            log_level="ERROR",
+            # device=device # AutoModel usually detects, but we can rely on default
         )
         print(f"[{datetime.now()}] [ASR] Model loaded.")
     except Exception as e:
@@ -30,9 +55,11 @@ def generate_srt(audio_file: str, output_srt: str) -> None:
         raise e
     
     
-    print(f"[{datetime.now()}] [ASR] Running inference...")
+    print(f"[{datetime.now()}] [ASR] Running inference (Batch Size: 60s)...")
     try:
-        res = model.generate(input=audio_file, batch_size_s=300)
+        # Reduced batch_size_s from 300 to 60 to prevent long pauses/hangs on long files
+        res = model.generate(input=audio_file, batch_size_s=60)
+        print(f"[{datetime.now()}] [ASR] Inference completed. Processing results...")
     except Exception as e:
         print(f"[{datetime.now()}] [ASR] Error running inference: {e}")
         raise e
@@ -48,6 +75,8 @@ def generate_srt(audio_file: str, output_srt: str) -> None:
     text = entry.get('text', '')
     timestamps = entry.get('timestamp', []) # List of [start, end] in ms
 
+    print(f"[{datetime.now()}] [ASR] Text Length: {len(text)}, Timestamps: {len(timestamps)}")
+
     if not text or not timestamps:
          print("Warning: Empty text or timestamps.")
          with open(output_srt, 'w', encoding='utf-8') as f:
@@ -55,13 +84,6 @@ def generate_srt(audio_file: str, output_srt: str) -> None:
          return
     
     # Logic to split by punctuation
-    # We assume len(text) roughly equals len(timestamps) or we use the index.
-    # Note: FunASR timestamps are for valid tokens. Punctuation might be inserted by punc_model and might not have timestamp.
-    # We need to be careful.
-    
-    # Actually, punc_model inserts punctuation into 'text'. 'timestamp' corresponds to the acoustic tokens (characters without punctuation usually).
-    # So len(text) >= len(timestamps).
-    
     segments = []
     
     current_text = ""
@@ -70,12 +92,13 @@ def generate_srt(audio_file: str, output_srt: str) -> None:
     
     ts_idx = 0
     
+    # Process text loop
+    start_process_time = datetime.now()
+    
     for char in text:
         current_text += char
         
         # Check if this char has a timestamp (is it a normal char?)
-        # Simple heuristic: if it's not punctuation, consume a timestamp.
-        # Punctuation list:
         full_puncs = "，。？！、；：,.?!;:"
         
         if char not in full_puncs:
@@ -87,7 +110,6 @@ def generate_srt(audio_file: str, output_srt: str) -> None:
                 ts_idx += 1
         
         # Split condition
-        # Update: Split on commas and semi-colons/colons to prevent long lines
         if char in "，。？！、；：,.?!;:":
             if start_time is not None and end_time is not None:
                 segments.append({
@@ -97,7 +119,6 @@ def generate_srt(audio_file: str, output_srt: str) -> None:
                 })
                 current_text = ""
                 start_time = None
-                # Keep end_time for gap calculation? No, reset.
         
     # Add remaining
     if current_text.strip() and start_time is not None:
@@ -106,7 +127,9 @@ def generate_srt(audio_file: str, output_srt: str) -> None:
             "end": end_time if end_time else start_time + 1000,
             "text": current_text.strip()
         })
-        
+    
+    print(f"[{datetime.now()}] [ASR] Post-processing took {datetime.now() - start_process_time}. Segments found: {len(segments)}")
+
     # Write SRT
     with open(output_srt, 'w', encoding='utf-8') as f:
         for i, seg in enumerate(segments):
@@ -116,13 +139,12 @@ def generate_srt(audio_file: str, output_srt: str) -> None:
             clean_text = seg['text'].translate(str.maketrans('', '', "，。？！、；：,.?!;:"))
             f.write(f"{clean_text}\n\n")
             
-    print(f"[{datetime.now()}] [ASR] SRT generated at {output_srt} ({len(segments)} segments)")
+    print(f"[{datetime.now()}] [ASR] SRT generated at {output_srt}")
     
     # Cleanup memory
     print(f"[{datetime.now()}] [ASR] Cleaning up ASR model memory...")
     del model
     import gc
-    import torch
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()

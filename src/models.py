@@ -15,6 +15,11 @@ class MixConfig(BaseModel):
     bgm_file: Optional[str] = None
     output_tag: str = ""
     
+    # Transition Configuration
+    # Options: "None", "Crossfade", "Fade to Black"
+    transition_type: str = "None" 
+    transition_duration: float = 0.5
+    
     # Subtitle Configuration
     subtitle_font_name: str = "Noto Sans CJK SC"
     subtitle_font_size: int = 9
