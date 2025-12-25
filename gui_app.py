@@ -2,11 +2,16 @@ import streamlit as st
 import os
 import json
 import time
+import pandas as pd
+from datetime import datetime
 from src.models import MixConfig, FolderWeight
 from src.pipeline import AutoClipPipeline
 from src.utils import get_subfolders, get_video_files
 from src.config_manager import ConfigManager
+from pathlib import Path
+from src.preprocess import process_video, get_video_files as get_all_video_files
 
+# --- Helper Functions ---
 def display_metadata(video_path):
     meta_path = video_path.replace('.mp4', '_metadata.json')
     if os.path.exists(meta_path):
@@ -15,7 +20,6 @@ def display_metadata(video_path):
                 with open(meta_path, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                 
-                # Format the data nicely
                 for chunk in data:
                     t_start = chunk.get('timeline_start', 0)
                     t_end = chunk.get('timeline_end', 0)
@@ -31,22 +35,6 @@ def display_metadata(video_path):
             except Exception as e:
                 st.error(f"无法读取元数据: {e}")
 
-st.set_page_config(page_title="AutoClip Studio", layout="wide")
-
-# --- Load Configuration ---
-cm = ConfigManager()
-config = cm.load_config()
-
-st.title("🚀 AutoClip 智能混剪 (音频驱动)")
-
-# Assets Path
-ASSETS_DIR = os.path.join(os.getcwd(), "assets")
-OUTPUT_DIR = os.path.join(os.getcwd(), "output")
-
-# Sidebar / Config
-st.sidebar.header("全局设置")
-
-# Help function to find index for selectbox
 def get_index(options, target):
     try:
         if target in options:
@@ -55,293 +43,392 @@ def get_index(options, target):
     except ValueError:
         return 0
 
-batch_count = st.sidebar.number_input(
-    "生成视频数量", 
-    min_value=1, 
-    value=config.get("batch_count", 1),
-    key="batch_count"
-)
+def render_queue_dataframe(placeholder):
+    if not st.session_state['task_queue']:
+        placeholder.write("队列为空 (Empty Queue)")
+    else:
+        queue_display = []
+        for t in st.session_state['task_queue']:
+            queue_display.append({
+                "ID": t["id"],
+                "音频": t["audio_name"],
+                "字幕": t["srt_name"],
+                "数量": t["count"],
+                "状态": t["status"]
+            })
+        placeholder.dataframe(pd.DataFrame(queue_display), hide_index=True)
+
+# --- Page Setup ---
+st.set_page_config(page_title="AutoClip Studio", layout="wide")
+
+# --- State Initialization ---
+if 'task_queue' not in st.session_state:
+    st.session_state['task_queue'] = []
+if 'uploader_key' not in st.session_state:
+    st.session_state['uploader_key'] = 0
+if 'save_config_requested' not in st.session_state:
+    st.session_state['save_config_requested'] = False
+
+# --- Load Configuration ---
+cm = ConfigManager()
+config = cm.load_config()
+
+# Directories
+ASSETS_DIR = os.path.join(os.getcwd(), "assets")
+OUTPUT_DIR = os.path.join(os.getcwd(), "output")
+TEMP_UPLOAD_DIR = os.path.join(os.getcwd(), "temp_uploads")
+os.makedirs(TEMP_UPLOAD_DIR, exist_ok=True)
+
+st.title("🚀 AutoClip 智能混剪 (Task Queue Mode)")
+
+# --- Sidebar: Global Configuration ---
+st.sidebar.header("全局设置 (Global Settings)")
 
 output_tag = st.sidebar.text_input(
-    "输出文件夹标签 (可选)", 
+    "输出文件夹标签 (前缀)", 
     value=config.get("output_tag", ""),
-    help="生成的文件夹名将以此作为前缀",
+    help="所有任务生成的文件夹名将以此作为前缀",
     key="output_tag"
 )
 
+# Resolution
 st.sidebar.subheader("视频分辨率")
 res_options = ["抖音 / Reels (1080x1920)", "Shorts (1080x1920)", "自定义"]
 res_option = st.sidebar.selectbox(
-    "选择分辨率",
-    res_options,
+    "选择分辨率", res_options,
     index=get_index(res_options, config.get("res_option")),
     key="res_option"
 )
 
 if res_option == "自定义":
-    vid_width = st.sidebar.number_input("宽度", min_value=100, value=config.get("custom_width", 1080), step=10, key="custom_width")
-    vid_height = st.sidebar.number_input("高度", min_value=100, value=config.get("custom_height", 1920), step=10, key="custom_height")
+    vid_width = st.sidebar.number_input("宽度", min_value=100, value=config.get("custom_width", 1080), key="custom_width")
+    vid_height = st.sidebar.number_input("高度", min_value=100, value=config.get("custom_height", 1920), key="custom_height")
 elif "横屏" in res_option:
     vid_width, vid_height = 1920, 1080
 else:
-    # TikTok / Shorts default
     vid_width, vid_height = 1080, 1920
 
+# Audio/Subtitle Style
 st.sidebar.divider()
-st.sidebar.header("🛠️ 素材预处理 (工具)")
-prep_ratio_options = ["抖音 (9:16)", "Youtube (16:9)", "自定义"]
-prep_ratio = st.sidebar.selectbox(
-    "预处理目标比例",
-    prep_ratio_options,
-    index=get_index(prep_ratio_options, config.get("prep_ratio")),
-    key="prep_ratio"
+bgm_files = []
+bgm_dir = os.path.join(ASSETS_DIR, "bgm")
+if os.path.exists(bgm_dir):
+    bgm_files = [f for f in os.listdir(bgm_dir) if f.endswith(('.mp3', '.wav'))]
+
+bgm_options = ["无 (None)"] + bgm_files
+bgm_selected = st.sidebar.selectbox(
+    "背景音乐 (BGM)", 
+    bgm_options,
+    index=get_index(bgm_options, config.get("bgm_selected")),
+    key="bgm_selected"
 )
 
-prep_w, prep_h = 1080, 1920
-if prep_ratio == "自定义":
-    prep_w = st.sidebar.number_input("宽", min_value=100, value=config.get("prep_custom_w", 1080), step=10, key="prep_custom_w")
-    prep_h = st.sidebar.number_input("高", min_value=100, value=config.get("prep_custom_h", 1920), step=10, key="prep_custom_h")
-elif "16:9" in prep_ratio:
-    prep_w, prep_h = 1920, 1080
-else:
-    # 9:16
-    prep_w, prep_h = 1080, 1920
+with st.sidebar.expander("字幕样式配置"):
+    sub_font_name = st.text_input("字体名称", value=config.get("sub_font_name", "Noto Sans CJK SC"), key="sub_font_name")
+    c1, c2 = st.columns(2)
+    with c1:
+        sub_font_size = st.number_input("字体大小", value=config.get("sub_font_size", 9), min_value=1, key="sub_font_size")
+        sub_outline = st.number_input("描边宽度", value=config.get("sub_outline", 1), min_value=0, key="sub_outline")
+        sub_bold = st.checkbox("粗体", value=config.get("sub_bold", True), key="sub_bold")
+    with c2:
+        sub_color = st.color_picker("字体颜色", value=config.get("sub_color", "#FFFFFF"), key="sub_color")
+        sub_shadow = st.number_input("阴影深度", value=config.get("sub_shadow", 1), min_value=0, key="sub_shadow")
+        sub_margin_v = st.number_input("垂直边距 (MarginV)", value=config.get("sub_margin_v", 15), min_value=0, key="sub_margin_v")
 
-if st.sidebar.button("⚙️ 一键预处理素材"):
-    from src.preprocessor import preprocess_videos
-    
-    status_bar = st.sidebar.progress(0)
-    status_text = st.sidebar.empty()
-    
-    def on_prep_progress(p, msg):
-        status_bar.progress(p)
-        status_text.text(msg)
-        
-    try:
-        count, msg = preprocess_videos(ASSETS_DIR, (prep_w, prep_h), on_prep_progress)
-        st.sidebar.success(f"完成! 共处理 {count} 个文件")
-        time.sleep(1)
-        status_text.empty()
-        status_bar.empty()
-    except Exception as e:
-        st.sidebar.error(f"出错: {e}")
-
+# Video Source Weights
 st.sidebar.divider()
+st.sidebar.subheader("视觉素材权重 (Global)")
+video_root = os.path.join(ASSETS_DIR, "video")
+subfolders = [f for f in get_subfolders(video_root) if get_video_files(os.path.join(video_root, f))]
+folder_weights = []
+current_weights_map = {}
 
-# --- Save Configuration Button ---
-if st.sidebar.button("💾 保存当前配置"):
+if not subfolders:
+    st.sidebar.warning("未找到素材文件夹。")
+else:
+    loaded_ordered = config.get("ordered_folders", [])
+    valid_defaults = [f for f in loaded_ordered if f in subfolders] or subfolders
+    
+    selected_ordered_subfolders = st.sidebar.multiselect(
+        "启用素材文件夹", options=subfolders, default=valid_defaults, key="ordered_folders_multiselect"
+    )
+    
+    saved_weights = config.get("folder_weights", {})
+    for folder in selected_ordered_subfolders:
+         val = st.sidebar.slider(f"{folder} 权重", 0, 100, saved_weights.get(folder, 50), key=f"w_{folder}")
+         current_weights_map[folder] = val
+         folder_weights.append(FolderWeight(folder=folder, weight=val))
+
+if st.sidebar.button("💾 保存配置 (Save Config)"):
     st.session_state['save_config_requested'] = True
 
-# Main Area
-col1, col2 = st.columns([1, 1])
+# --- Preprocessing Tool ---
+st.sidebar.divider()
+st.sidebar.header("🛠️ 素材预处理工具")
+with st.sidebar.expander("一键格式化 (Pre-process)", expanded=False):
+    st.info("自动将 assets/video 下的视频裁剪为指定比例。")
+    
+    pp_mode = st.radio("目标分辨率", ["竖屏 (1080x1920)", "横屏 (1920x1080)", "自定义"], key="pp_mode")
+    
+    if pp_mode == "自定义":
+        pp_w = st.number_input("宽 (Width)", value=1080, key="pp_cw")
+        pp_h = st.number_input("高 (Height)", value=1920, key="pp_ch")
+    elif "横屏" in pp_mode:
+        pp_w, pp_h = 1920, 1080
+    else:
+        pp_w, pp_h = 1080, 1920
+    
+    overwrite_src = st.checkbox("⚠️ 覆盖原文件 (Overwrite)", value=True, help="警告：处理成功后将直接替换原始文件，操作不可逆！")
+        
+    if st.button("🚀 开始处理"):
+        src_dir = os.path.join(ASSETS_DIR, "video")
+        
+        if not os.path.exists(src_dir):
+            st.error(f"源文件夹不存在: {src_dir}")
+        else:
+            files_to_proc = get_all_video_files(src_dir)
+            if not files_to_proc:
+                st.warning("源文件夹中没有视频文件。")
+            else:
+                pp_prog = st.progress(0)
+                pp_status = st.empty()
+                
+                # Check overwrite mode
+                if overwrite_src:
+                     st.warning("模式: ⚠️ 覆盖原文件")
+                else: 
+                     dst_dir = os.path.join(ASSETS_DIR, "video_optimized")
+                     st.info(f"模式: 输出到 {dst_dir}")
+
+                success_count = 0
+                # Prepare tasks list
+                tasks = []
+                
+                # Logic to prepare tasks
+                for fpath in files_to_proc:
+                    if overwrite_src:
+                        out_path = fpath + ".tmp.mp4" # Temp file for overwrite
+                    else:
+                        rel_path = os.path.relpath(fpath, src_dir)
+                        out_path_full = os.path.join(dst_dir, rel_path)
+                        out_path = str(Path(out_path_full).with_suffix('.mp4'))
+                        
+                        # Skip if exists and not overwrite (simple check before safe process)
+                        if os.path.exists(out_path):
+                            continue
+                            
+                    tasks.append((fpath, out_path, pp_w, pp_h))
+                
+                if not tasks:
+                    st.info("所有文件已存在或无需处理。")
+                else:
+                    from src.preprocess import batch_process_parallel
+                    
+                    # Use 50% of cores by default for GUI
+                    max_workers = max(1, os.cpu_count() // 2)
+                    st.write(f"正在使用 {max_workers} 个并行进程处理...")
+
+                    def update_progress(curr, total):
+                        pp_prog.progress(curr / total)
+                        pp_status.text(f"Processing... {curr}/{total}")
+
+                    results = batch_process_parallel(tasks, max_workers=max_workers, progress_callback=update_progress)
+                    
+                    # Post-processing for overwrite mode
+                    if overwrite_src:
+                        for i, (fpath, tmp_path, _, _) in enumerate(tasks):
+                            if results[i]: # If success
+                                try:
+                                    os.replace(tmp_path, fpath)
+                                    success_count += 1
+                                except Exception as e:
+                                    st.error(f"Replace failed: {e}")
+                            else:
+                                if os.path.exists(tmp_path):
+                                    os.remove(tmp_path)
+                    else:
+                        success_count = sum(results) + (len(files_to_proc) - len(tasks)) # Add skipped ones
+                
+                pp_status.success(f"处理完成！成功: {success_count}/{len(files_to_proc)}")
+
+# --- Main Interface ---
+
+col1, col2 = st.columns([1, 1], gap="large")
 
 with col1:
-    st.subheader("1. 音频与字幕")
+    st.subheader("1. 添加任务 (Add Task)")
+    st.info("上传音频和字幕，添加到待处理队列。")
     
-    # Ensure temp dir exists
-    TEMP_UPLOAD_DIR = os.path.join(os.getcwd(), "temp_uploads")
-    os.makedirs(TEMP_UPLOAD_DIR, exist_ok=True)
+    # Dynamic key to reset uploader
+    ukey = st.session_state['uploader_key']
     
-    uploaded_audio = st.file_uploader("上传音频 (必选)", type=['mp3', 'wav', 'm4a'])
-    uploaded_srt = st.file_uploader("上传 SRT 字幕 (可选)", type=['srt'])
-    
-    audio_path_str = ""
-    srt_path_str = None
-    
-    if uploaded_audio:
-        # Save to temp
-        audio_path_str = os.path.join(TEMP_UPLOAD_DIR, uploaded_audio.name)
-        with open(audio_path_str, "wb") as f:
-            f.write(uploaded_audio.getbuffer())
-        st.success(f"已加载: {uploaded_audio.name}")
-            
-    if uploaded_srt:
-        srt_path_str = os.path.join(TEMP_UPLOAD_DIR, uploaded_srt.name)
-        with open(srt_path_str, "wb") as f:
-            f.write(uploaded_srt.getbuffer())
-        st.success(f"已加载: {uploaded_srt.name}")
-    else:
-        st.info("未上传字幕。将使用 FunASR 自动生成。")
-
-    bgm_files = []
-    bgm_dir = os.path.join(ASSETS_DIR, "bgm")
-    if os.path.exists(bgm_dir):
-        bgm_files = [f for f in os.listdir(bgm_dir) if f.endswith(('.mp3', '.wav'))]
-    
-    bgm_options = ["无 (None)"] + bgm_files
-    bgm_selected = st.selectbox(
-        "背景音乐 (可选)", 
-        bgm_options,
-        index=get_index(bgm_options, config.get("bgm_selected")),
-        key="bgm_selected"
-    )
-
-    with st.expander("字幕样式配置 (高级)"):
-        sub_font_name = st.text_input("字体名称", value=config.get("sub_font_name", "Noto Sans CJK SC"), key="sub_font_name")
-        c1, c2 = st.columns(2)
-        with c1:
-            sub_font_size = st.number_input("字体大小", value=config.get("sub_font_size", 9), min_value=1, key="sub_font_size")
-            sub_outline = st.number_input("描边宽度", value=config.get("sub_outline", 1), min_value=0, key="sub_outline")
-            sub_bold = st.checkbox("粗体", value=config.get("sub_bold", True), key="sub_bold")
-        with c2:
-            sub_color = st.color_picker("字体颜色", value=config.get("sub_color", "#FFFFFF"), key="sub_color")
-            sub_shadow = st.number_input("阴影深度", value=config.get("sub_shadow", 1), min_value=0, key="sub_shadow")
-            sub_margin_v = st.number_input("垂直边距 (MarginV)", value=config.get("sub_margin_v", 15), min_value=0, key="sub_margin_v")
+    with st.form("add_task_form", clear_on_submit=True):
+        uploaded_audio = st.file_uploader("音频文件 (必选)", type=['mp3', 'wav', 'm4a'], key=f"audio_{ukey}")
+        uploaded_srt = st.file_uploader("字幕文件 (可选, 留空自动生成)", type=['srt'], key=f"srt_{ukey}")
+        task_count = st.number_input("生成数量", min_value=1, value=config.get("batch_count", 1), key=f"cnt_{ukey}")
+        
+        submitted = st.form_submit_button("➕ 添加到队列")
+        
+        if submitted:
+            if not uploaded_audio:
+                st.error("必须上传音频文件！")
+            else:
+                # 1. Save Files
+                audio_path = os.path.join(TEMP_UPLOAD_DIR, uploaded_audio.name)
+                with open(audio_path, "wb") as f:
+                    f.write(uploaded_audio.getbuffer())
+                
+                srt_path = None
+                srt_display = "Auto Check"
+                if uploaded_srt:
+                    srt_path = os.path.join(TEMP_UPLOAD_DIR, uploaded_srt.name)
+                    with open(srt_path, "wb") as f:
+                        f.write(uploaded_srt.getbuffer())
+                    srt_display = uploaded_srt.name
+                
+                # 2. Add to Session State
+                task_data = {
+                    "id": len(st.session_state['task_queue']) + 1,
+                    "audio_name": uploaded_audio.name,
+                    "audio_path": audio_path,
+                    "srt_name": srt_display,
+                    "srt_path": srt_path,
+                    "count": task_count,
+                    "status": "Ready"
+                }
+                st.session_state['task_queue'].append(task_data)
+                
+                # 3. Increment Key to reset uploader
+                st.session_state['uploader_key'] += 1
+                st.success(f"任务已添加: {uploaded_audio.name}")
+                st.rerun()
 
 with col2:
-    st.subheader("2. 视觉素材与权重")
-    st.info("💡 顺序决定时间线流程。权重决定时长占比。")
+    st.subheader("2. 任务队列 (Queue)")
     
-    video_root = os.path.join(ASSETS_DIR, "video")
-    subfolders = [
-        f for f in get_subfolders(video_root) 
-        if get_video_files(os.path.join(video_root, f))
-    ]
-    
-    folder_weights = []
-    current_weights_map = {} # To store for saving
-
-    if not subfolders:
-        st.warning(f"{video_root} 未找到子文件夹。请添加视频素材。")
+    if not st.session_state['task_queue']:
+        # Placeholder for empty state or table
+        queue_placeholder = st.empty()
+        render_queue_dataframe(queue_placeholder)
     else:
-        # Resolve Defaults for Multiselect
-        loaded_ordered = config.get("ordered_folders", [])
-        # Filter to keep only existing ones
-        valid_defaults = [f for f in loaded_ordered if f in subfolders]
+        queue_placeholder = st.empty()
+        render_queue_dataframe(queue_placeholder)
         
-        if not valid_defaults and not loaded_ordered:
-            valid_defaults = subfolders
+        c_act1, c_act2 = st.columns(2)
+        if c_act1.button("🗑️ 清空队列"):
+            st.session_state['task_queue'] = []
+            st.rerun()
         
-        selected_ordered_subfolders = st.multiselect(
-            "选择并排序视频素材文件夹", 
-            options=subfolders,
-            default=valid_defaults,
-            key="ordered_folders_multiselect"
-        )
+        start_btn = c_act2.button("🎬 开始批量生成", type="primary")
 
-        if not selected_ordered_subfolders:
-             st.warning("请至少选择一个文件夹。")
-        else:
-            ordered_weights_list = [] # Store tuples (folder, weight)
-            saved_weights = config.get("folder_weights", {})
-
-            for folder in selected_ordered_subfolders:
-                key = f"w_{folder}"
-                # Get saved weight or default 50
-                default_val = saved_weights.get(folder, 50)
-                
-                val = st.slider(f"{folder}", 0, 100, default_val, key=key)
-                ordered_weights_list.append((folder, val))
-                current_weights_map[folder] = val
-                
-            total_w = sum(w for _, w in ordered_weights_list)
-            
-            if total_w > 0:
-                st.write("**时间线分布:**")
-                for f, w in ordered_weights_list:
-                    pct = (w / total_w) * 100
-                    st.write(f"- **{f}**: {pct:.1f}%")
-                    folder_weights.append(FolderWeight(folder=f, weight=w))
-            else:
-                st.error("总权重必须大于 0")
-
+# --- Execution Area ---
 st.divider()
 
-# Action Logic
-if st.button("🎬 开始生成", type="primary"):
-    if not uploaded_audio:
-        st.error("请上传音频文件。")
-    elif not folder_weights:
-        st.error("请配置文件夹权重。")
+if 'start_btn' in locals() and start_btn:
+    if not folder_weights:
+        st.error("错误：未配置视频素材权重。请在侧边栏设置。")
+    elif not st.session_state['task_queue']:
+        st.error("错误：队列为空。")
     else:
-        # Config (Runtime)
-        mix_config = MixConfig(
-            audio_path=audio_path_str,
-            srt_path=srt_path_str,
-            folder_weights=folder_weights,
-            batch_count=batch_count,
-            bgm_file=None if bgm_selected == "无 (None)" else bgm_selected,
-            width=vid_width,
-            height=vid_height,
-            subtitle_font_name=sub_font_name,
-            subtitle_font_size=sub_font_size,
-            subtitle_color=sub_color,
-            subtitle_outline=sub_outline,
-            subtitle_shadow=sub_shadow,
-            subtitle_margin_v=sub_margin_v,
-            subtitle_bold=sub_bold,
-            output_tag=output_tag
-        )
-        
-        # Run Pipeline
         pipeline = AutoClipPipeline(ASSETS_DIR, OUTPUT_DIR)
         
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        timer_text = st.empty()
+        main_progress = st.progress(0)
+        main_status = st.empty()
         
-        start_ts = time.time()
+        total_tasks = len(st.session_state['task_queue'])
+        all_results = []
         
-        def update_progress(p, msg):
-            progress_bar.progress(p)
-            status_text.text(msg)
-            elapsed = time.time() - start_ts
-            timer_text.info(f"⏱️ 已耗时: {elapsed:.1f}s")
+        start_time_global = time.time()
+        
+        for idx, task in enumerate(st.session_state['task_queue']):
+            task_id = idx + 1
+            main_status.markdown(f"### 正在处理任务 {task_id}/{total_tasks}: {task['audio_name']}")
             
-        try:
-            results = pipeline.run(mix_config, progress_callback=update_progress)
-            total_duration = time.time() - start_ts
-            st.success(f"成功生成 {len(results)} 个视频，耗时 {total_duration:.2f} 秒！")
-            timer_text.empty() # Clear running timer
+            # Construct Config for this task
+            mix_config = MixConfig(
+                audio_path=task['audio_path'],
+                srt_path=task['srt_path'],
+                folder_weights=folder_weights,
+                batch_count=task['count'],
+                bgm_file=None if bgm_selected == "无 (None)" else bgm_selected,
+                width=vid_width,
+                height=vid_height,
+                subtitle_font_name=sub_font_name,
+                subtitle_font_size=sub_font_size,
+                subtitle_color=sub_color,
+                subtitle_outline=sub_outline,
+                subtitle_shadow=sub_shadow,
+                subtitle_margin_v=sub_margin_v,
+                subtitle_bold=sub_bold,
+                output_tag=output_tag
+            )
             
-            st.write("---")
-            for i in range(0, len(results), 2):
+            # Progress Callback wrapper
+            def task_progress(p, msg):
+                # Map task progress (0-1) to global progress slot for this task
+                global_p = (idx + p) / total_tasks
+                main_progress.progress(min(global_p, 1.0))
+                # Optional: Show detailed sub-status if needed
+            
+            try:
+                results = pipeline.run(mix_config, progress_callback=task_progress)
+                task['status'] = 'Done'
+                render_queue_dataframe(queue_placeholder)
+                all_results.extend(results)
+                st.success(f"任务 {task_id} 完成! 生成 {len(results)} 个视频。")
+                
+            except Exception as e:
+                task['status'] = 'Error'
+                render_queue_dataframe(queue_placeholder)
+                st.error(f"任务 {task['audio_name']} 失败: {e}")
+                
+        main_progress.progress(1.0)
+        main_status.success(f"✅ 所有任务完成！总耗时: {time.time() - start_time_global:.1f}s")
+        
+        # Display Results
+        st.write("---")
+        st.subheader("生成结果预览")
+        
+        if not all_results:
+            st.warning("无视频生成。")
+        else:
+             for i in range(0, len(all_results), 2):
                 cols = st.columns(2)
                 with cols[0]:
-                    st.write(f"**输出文件:** `{os.path.basename(results[i])}`")
-                    st.video(results[i])
-                    display_metadata(results[i])
+                    st.write(f"📁 `{os.path.basename(all_results[i])}`")
+                    st.video(all_results[i])
+                    display_metadata(all_results[i])
                 
-                if i + 1 < len(results):
+                if i + 1 < len(all_results):
                     with cols[1]:
-                        st.write(f"**输出文件:** `{os.path.basename(results[i+1])}`")
-                        st.video(results[i+1])
-                        display_metadata(results[i+1])
+                        st.write(f"📁 `{os.path.basename(all_results[i+1])}`")
+                        st.video(all_results[i+1])
+                        display_metadata(all_results[i+1])
 
-        except Exception as e:
-            st.error(f"错误: {str(e)}")
-            st.exception(e)
-
-# --- Handle Configuration Saving ---
+# --- Handle Save Config ---
 if st.session_state.get('save_config_requested'):
-    # Reset flag
     st.session_state['save_config_requested'] = False
-    
-    # Construct config object to save
     new_config = {
-        "batch_count": st.session_state.get("batch_count", 1),
-        "res_option": st.session_state.get("res_option", ""),
-        "custom_width": st.session_state.get("custom_width", 1080),
-        "custom_height": st.session_state.get("custom_height", 1920),
-        "prep_ratio": st.session_state.get("prep_ratio", ""),
-        "prep_custom_w": st.session_state.get("prep_custom_w", 1080),
-        "prep_custom_h": st.session_state.get("prep_custom_h", 1920),
-        "bgm_selected": st.session_state.get("bgm_selected"),
-        "output_tag": st.session_state.get("output_tag", ""),
-        # Subtitles
-        "sub_font_name": st.session_state.get("sub_font_name"),
-        "sub_font_size": st.session_state.get("sub_font_size"),
-        "sub_outline": st.session_state.get("sub_outline"),
-        "sub_bold": st.session_state.get("sub_bold"),
-        "sub_color": st.session_state.get("sub_color"),
-        "sub_shadow": st.session_state.get("sub_shadow"),
-        "sub_margin_v": st.session_state.get("sub_margin_v"),
+        "batch_count": 1, # Default placeholder
+        "res_option": res_option,
+        "custom_width": vid_width,
+        "custom_height": vid_height,
+        "bgm_selected": bgm_selected,
+        "output_tag": output_tag,
+        # Subtitles (Use current session state keys or vars)
+        "sub_font_name": sub_font_name,
+        "sub_font_size": sub_font_size,
+        "sub_outline": sub_outline,
+        "sub_bold": sub_bold,
+        "sub_color": sub_color,
+        "sub_shadow": sub_shadow,
+        "sub_margin_v": sub_margin_v,
         # Folders
         "ordered_folders": st.session_state.get("ordered_folders_multiselect", []),
         "folder_weights": current_weights_map
     }
     
     if cm.save_config(new_config):
-        st.sidebar.success("✅ 配置已保存到 user_config.json")
+        st.sidebar.success("✅ 配置已保存!")
     else:
         st.sidebar.error("❌ 配置保存失败")

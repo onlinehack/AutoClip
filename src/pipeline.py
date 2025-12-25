@@ -23,7 +23,20 @@ class AutoClipPipeline:
     def run(self, config: MixConfig, progress_callback=None):
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         
-        folder_name = f"{timestamp}_Batch"
+        # CPU Optimization for Xeon/High-core CPUs
+        # Detected cores or default to 16 if retrieval fails
+        cpu_cores = os.cpu_count() or 16
+        # Limit threads to reasonable max for FFmpeg (usually diminishing returns > 32, but let's allow up to 32 or full usage)
+        # For Xeon, using all cores is generally desired.
+        render_threads = max(4, cpu_cores)
+        print(f"[{datetime.now()}] [Pipeline] Multi-core Optimization: Using {render_threads} threads for encoding.")
+        
+        # Extract audio identifier
+        audio_stem = os.path.splitext(os.path.basename(config.audio_path))[0]
+        # Sanitize audio name
+        safe_audio_name = "".join(c for c in audio_stem if c.isalnum() or c in ('_', '-')).strip()
+        
+        folder_name = f"{timestamp}_{safe_audio_name}_Batch"
         if config.output_tag:
             # Join with underscore, make sure no weird characters
             safe_tag = "".join(c for c in config.output_tag if c.isalnum() or c in ('_', '-')).strip()
@@ -195,7 +208,7 @@ class AutoClipPipeline:
                         codec='libx264',
                         audio=False, 
                         preset='ultrafast',
-                        threads=8,
+                        threads=render_threads,
                         logger=None
                     )
                     
@@ -353,7 +366,7 @@ class AutoClipPipeline:
                     fps=24, 
                     codec='libx264', 
                     audio_codec='aac',
-                    threads=16,
+                    threads=render_threads,
                     logger=None,
                     ffmpeg_params=ffmpeg_params
                 )
