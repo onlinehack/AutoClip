@@ -5,14 +5,13 @@ import pysrt
 from datetime import datetime
 from typing import List
 from moviepy.editor import concatenate_videoclips, AudioFileClip, CompositeVideoClip, CompositeAudioClip, VideoFileClip
-# ColorClip might be needed for blank segments if no video found
 from moviepy.video.VideoClip import ColorClip
+from moviepy.video.fx.all import speedx
 
 from src.models import MixConfig
 # from src.utils import split_text # No longer needed
 from src.processors.asr import generate_srt
 from src.processors.matcher import Matcher
-
 
 class AutoClipPipeline:
     def __init__(self, assets_dir: str, output_dir: str):
@@ -112,6 +111,7 @@ class AutoClipPipeline:
                 
                 timeline_blocks.append({
                     "folder": os.path.join(self.assets_dir, "video", fw.folder),
+                    "speed": fw.speed, # Pass speed config
                     "start": current_t,
                     "end": current_t + duration_share
                 })
@@ -138,6 +138,7 @@ class AutoClipPipeline:
                 b_start = block["start"]
                 b_end = block["end"]
                 folder = block["folder"]
+                speed = block.get("speed", 1.0)
                 
                 curr = b_start
                 while curr < b_end:
@@ -157,6 +158,7 @@ class AutoClipPipeline:
                         "start": curr,
                         "end": next_t,
                         "folder": folder,
+                        "speed": speed,
                         "duration": next_t - curr,
                         "is_block_start": is_block_start,
                         "is_block_end": is_block_end,
@@ -245,12 +247,14 @@ class AutoClipPipeline:
                     if progress_callback and idx % 5 == 0:
                         progress_callback(0.2 + 0.6 * (idx / len(render_tasks)), msg)
 
-                    print(f"[{datetime.now()}] [Pipeline] [Batch {i+1}] Preparing Chunk {idx+1}/{len(render_tasks)}")
+                    speed_factor = task.get("speed", 1.0)
+                    print(f"[{datetime.now()}] [Pipeline] [Batch {i+1}] Preparing Chunk {idx+1}/{len(render_tasks)} (Speed: {speed_factor}x)")
                     
                     chunk_start = task["start"]
                     chunk_end = task["end"]
                     duration = task["duration"]
                     folder = task["folder"]
+                    speed_factor = task.get("speed", 1.0)
                     
                     # TRANSITION LOGIC
                     pad_head = 0.0
@@ -271,14 +275,21 @@ class AutoClipPipeline:
                     task["pad_head"] = pad_head
                     task["pad_tail"] = pad_tail
                     
-                    fetch_duration = duration + pad_head + pad_tail
+                    # The duration we NEED (in final video time)
+                    needed_duration = duration + pad_head + pad_tail
+                    
+                    # The duration we FETCH from source (raw time)
+                    # If speed is 2.0 (faster), we need 2x source material to fill the time.
+                    # If speed is 0.5 (slower), we need 0.5x source material.
+                    fetch_duration_source = needed_duration * speed_factor
                     
                     # Get Video Clip (Main Thread - SAFE)
                     video_clip = None
                     try:
                         if folder:
                             # print(f"[{datetime.now()}] [Pipeline] Searching clip...")
-                            video_clip, segment_meta = self.matcher.get_ordered_clip(folder, fetch_duration)
+                            # Fetch correct source length based on speed
+                            video_clip, segment_meta = self.matcher.get_ordered_clip(folder, fetch_duration_source)
                             
                             if video_clip:
                                 batch_metadata.append({
@@ -287,16 +298,23 @@ class AutoClipPipeline:
                                     "timeline_end": chunk_end,
                                     "segments": segment_meta,
                                     "transition_pad_head": pad_head,
-                                    "transition_pad_tail": pad_tail
+                                    "transition_pad_tail": pad_tail,
+                                    "speed_factor": speed_factor
                                 })
                         
                         if not video_clip:
                              print(f"[{datetime.now()}] Warning: No video found for chunk {idx}, using placeholder.")
-                             video_clip = ColorClip(size=(config.width, config.height), color=(0,0,0), duration=fetch_duration)
+                             video_clip = ColorClip(size=(config.width, config.height), color=(0,0,0), duration=needed_duration)
                         else:
+                            # Resize/Crop
                             video_clip = self.matcher.resize_and_crop(video_clip, (config.width, config.height))
+                            
+                            # Apply Speed Effect if needed
+                            if abs(speed_factor - 1.0) > 0.01:
+                                video_clip = video_clip.fx(speedx, speed_factor)
                         
-                        video_clip = video_clip.set_duration(fetch_duration)
+                        # Ensure exact duration (trim floating point errors or excess fetch)
+                        video_clip = video_clip.set_duration(needed_duration)
                         
                         # Apply Fade Effects (CPU bound, fast)
                         if config.transition_type == "Fade to Black":

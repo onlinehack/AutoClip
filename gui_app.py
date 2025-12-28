@@ -23,7 +23,8 @@ def display_metadata(video_path):
                 for chunk in data:
                     t_start = chunk.get('timeline_start', 0)
                     t_end = chunk.get('timeline_end', 0)
-                    st.markdown(f"**时间段: {t_start:.1f}s - {t_end:.1f}s**")
+                    speed = chunk.get('speed_factor', 1.0)
+                    st.markdown(f"**时间段: {t_start:.1f}s - {t_end:.1f}s (Speed: {speed}x)**")
                     
                     segments = chunk.get('segments', [])
                     for seg in segments:
@@ -155,10 +156,30 @@ else:
     )
     
     saved_weights = config.get("folder_weights", {})
+    # saved_weights format in config might be simple dict {folder: weight} OR newer {folder: {weight: x, speed: y}}
+    # We need to handle backward compatibility.
+    
     for folder in selected_ordered_subfolders:
-         val = st.sidebar.slider(f"{folder} 权重", 0, 100, saved_weights.get(folder, 50), key=f"w_{folder}")
-         current_weights_map[folder] = val
-         folder_weights.append(FolderWeight(folder=folder, weight=val))
+         # Extract saved values safely
+         fw_data = saved_weights.get(folder, 50)
+         if isinstance(fw_data, dict):
+             val_w = fw_data.get("weight", 50)
+             val_s = fw_data.get("speed", 1.0)
+         else:
+             val_w = fw_data if isinstance(fw_data, int) else 50
+             val_s = 1.0
+
+         c1, c2 = st.sidebar.columns([3, 1])
+         with c1:
+            val = st.slider(f"{folder}", 0, 100, val_w, key=f"w_{folder}", help=f"{folder} 权重")
+         with c2:
+            spd = st.number_input("x", 0.1, 10.0, float(val_s), 0.1, key=f"s_{folder}", help=f"{folder} 播放倍数")
+         
+         # Save structure for Config Manager (Complex Dict)
+         current_weights_map[folder] = {"weight": val, "speed": spd}
+         
+         # Construct Object for Pipeline
+         folder_weights.append(FolderWeight(folder=folder, weight=val, speed=spd))
 
 if st.sidebar.button("💾 保存配置 (Save Config)"):
     st.session_state['save_config_requested'] = True

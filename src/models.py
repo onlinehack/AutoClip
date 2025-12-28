@@ -4,6 +4,7 @@ from typing import List, Optional
 class FolderWeight(BaseModel):
     folder: str
     weight: int
+    speed: float = 1.0
 
 class MixConfig(BaseModel):
     audio_path: str
