@@ -5,6 +5,8 @@ class FolderWeight(BaseModel):
     folder: str
     weight: int
     speed: float = 1.0
+    clip_min_duration: float = 0.0
+    clip_max_duration: float = 0.0
 
 class MixConfig(BaseModel):
     audio_path: str

@@ -70,6 +70,11 @@ if 'uploader_key' not in st.session_state:
     st.session_state['uploader_key'] = 0
 if 'save_config_requested' not in st.session_state:
     st.session_state['save_config_requested'] = False
+if 'is_running' not in st.session_state:
+    st.session_state['is_running'] = False
+
+# Global disabled state
+is_locked = st.session_state['is_running']
 
 # --- Load Configuration ---
 cm = ConfigManager()
@@ -90,7 +95,8 @@ output_tag = st.sidebar.text_input(
     "输出文件夹标签 (前缀)", 
     value=config.get("output_tag", ""),
     help="所有任务生成的文件夹名将以此作为前缀",
-    key="output_tag"
+    key="output_tag",
+    disabled=is_locked
 )
 
 # Resolution
@@ -99,12 +105,13 @@ res_options = ["抖音 / Reels (1080x1920)", "Shorts (1080x1920)", "自定义"]
 res_option = st.sidebar.selectbox(
     "选择分辨率", res_options,
     index=get_index(res_options, config.get("res_option")),
-    key="res_option"
+    key="res_option",
+    disabled=is_locked
 )
 
 if res_option == "自定义":
-    vid_width = st.sidebar.number_input("宽度", min_value=100, value=config.get("custom_width", 1080), key="custom_width")
-    vid_height = st.sidebar.number_input("高度", min_value=100, value=config.get("custom_height", 1920), key="custom_height")
+    vid_width = st.sidebar.number_input("宽度", min_value=100, value=config.get("custom_width", 1080), key="custom_width", disabled=is_locked)
+    vid_height = st.sidebar.number_input("高度", min_value=100, value=config.get("custom_height", 1920), key="custom_height", disabled=is_locked)
 elif "横屏" in res_option:
     vid_width, vid_height = 1920, 1080
 else:
@@ -122,20 +129,21 @@ bgm_selected = st.sidebar.selectbox(
     "背景音乐 (BGM)", 
     bgm_options,
     index=get_index(bgm_options, config.get("bgm_selected")),
-    key="bgm_selected"
+    key="bgm_selected",
+    disabled=is_locked
 )
 
 with st.sidebar.expander("字幕样式配置"):
-    sub_font_name = st.text_input("字体名称", value=config.get("sub_font_name", "Noto Sans CJK SC"), key="sub_font_name")
+    sub_font_name = st.text_input("字体名称", value=config.get("sub_font_name", "Noto Sans CJK SC"), key="sub_font_name", disabled=is_locked)
     c1, c2 = st.columns(2)
     with c1:
-        sub_font_size = st.number_input("字体大小", value=config.get("sub_font_size", 9), min_value=1, key="sub_font_size")
-        sub_outline = st.number_input("描边宽度", value=config.get("sub_outline", 1), min_value=0, key="sub_outline")
-        sub_bold = st.checkbox("粗体", value=config.get("sub_bold", True), key="sub_bold")
+        sub_font_size = st.number_input("字体大小", value=config.get("sub_font_size", 9), min_value=1, key="sub_font_size", disabled=is_locked)
+        sub_outline = st.number_input("描边宽度", value=config.get("sub_outline", 1), min_value=0, key="sub_outline", disabled=is_locked)
+        sub_bold = st.checkbox("粗体", value=config.get("sub_bold", True), key="sub_bold", disabled=is_locked)
     with c2:
-        sub_color = st.color_picker("字体颜色", value=config.get("sub_color", "#FFFFFF"), key="sub_color")
-        sub_shadow = st.number_input("阴影深度", value=config.get("sub_shadow", 1), min_value=0, key="sub_shadow")
-        sub_margin_v = st.number_input("垂直边距 (MarginV)", value=config.get("sub_margin_v", 15), min_value=0, key="sub_margin_v")
+        sub_color = st.color_picker("字体颜色", value=config.get("sub_color", "#FFFFFF"), key="sub_color", disabled=is_locked)
+        sub_shadow = st.number_input("阴影深度", value=config.get("sub_shadow", 1), min_value=0, key="sub_shadow", disabled=is_locked)
+        sub_margin_v = st.number_input("垂直边距 (MarginV)", value=config.get("sub_margin_v", 15), min_value=0, key="sub_margin_v", disabled=is_locked)
 
 # Video Source Weights
 st.sidebar.divider()
@@ -152,36 +160,64 @@ else:
     valid_defaults = [f for f in loaded_ordered if f in subfolders] or subfolders
     
     selected_ordered_subfolders = st.sidebar.multiselect(
-        "启用素材文件夹", options=subfolders, default=valid_defaults, key="ordered_folders_multiselect"
+        "启用素材文件夹", options=subfolders, default=valid_defaults, key="ordered_folders_multiselect",
+        disabled=is_locked
     )
     
+    # Global Random Cut Toggle
+    use_random_cuts = st.sidebar.checkbox("启用随机片段截取 (Random Segments)", value=config.get("use_random_cuts", False), key="use_random_cuts_toggle", disabled=is_locked)
+
     saved_weights = config.get("folder_weights", {})
-    # saved_weights format in config might be simple dict {folder: weight} OR newer {folder: {weight: x, speed: y}}
-    # We need to handle backward compatibility.
-    
+
     for folder in selected_ordered_subfolders:
          # Extract saved values safely
          fw_data = saved_weights.get(folder, 50)
          if isinstance(fw_data, dict):
              val_w = fw_data.get("weight", 50)
              val_s = fw_data.get("speed", 1.0)
+             val_min = fw_data.get("clip_min_duration", 2.0)
+             val_max = fw_data.get("clip_max_duration", 4.0)
          else:
              val_w = fw_data if isinstance(fw_data, int) else 50
              val_s = 1.0
+             val_min = 2.0
+             val_max = 4.0
 
          c1, c2 = st.sidebar.columns([3, 1])
          with c1:
-            val = st.slider(f"{folder}", 0, 100, val_w, key=f"w_{folder}", help=f"{folder} 权重")
+            val = st.slider(f"{folder}", 0, 100, val_w, key=f"w_{folder}", help=f"{folder} 权重", disabled=is_locked)
          with c2:
-            spd = st.number_input("x", 0.1, 10.0, float(val_s), 0.1, key=f"s_{folder}", help=f"{folder} 播放倍数")
+            spd = st.number_input("x", 0.1, 10.0, float(val_s), 0.1, key=f"s_{folder}", help=f"{folder} 播放倍数", disabled=is_locked)
+            
+         # Random Cut Config
+         final_min = 0.0
+         final_max = 0.0
+         if use_random_cuts:
+             st.sidebar.caption(f"👆 {folder} 单片段时长范围 (秒):")
+             c_r1, c_r2 = st.sidebar.columns(2)
+             with c_r1:
+                 final_min = st.number_input(f"Min (s)", 0.5, 60.0, float(val_min), 0.5, key=f"rmin_{folder}", label_visibility="collapsed", help=f"随机截取的最小片段时长 (秒)", disabled=is_locked)
+             with c_r2:
+                 final_max = st.number_input(f"Max (s)", 0.5, 60.0, float(val_max), 0.5, key=f"rmax_{folder}", label_visibility="collapsed", help=f"随机截取的最大片段时长 (秒)", disabled=is_locked)
          
          # Save structure for Config Manager (Complex Dict)
-         current_weights_map[folder] = {"weight": val, "speed": spd}
+         current_weights_map[folder] = {
+             "weight": val, 
+             "speed": spd,
+             "clip_min_duration": final_min,
+             "clip_max_duration": final_max
+         }
          
          # Construct Object for Pipeline
-         folder_weights.append(FolderWeight(folder=folder, weight=val, speed=spd))
+         folder_weights.append(FolderWeight(
+             folder=folder, 
+             weight=val, 
+             speed=spd,
+             clip_min_duration=final_min,
+             clip_max_duration=final_max
+         ))
 
-if st.sidebar.button("💾 保存配置 (Save Config)"):
+if st.sidebar.button("💾 保存配置 (Save Config)", disabled=is_locked):
     st.session_state['save_config_requested'] = True
 
 # --- Preprocessing Tool ---
@@ -190,19 +226,19 @@ st.sidebar.header("🛠️ 素材预处理工具")
 with st.sidebar.expander("一键格式化 (Pre-process)", expanded=False):
     st.info("自动将 assets/video 下的视频裁剪为指定比例。")
     
-    pp_mode = st.radio("目标分辨率", ["竖屏 (1080x1920)", "横屏 (1920x1080)", "自定义"], key="pp_mode")
+    pp_mode = st.radio("目标分辨率", ["竖屏 (1080x1920)", "横屏 (1920x1080)", "自定义"], key="pp_mode", disabled=is_locked)
     
     if pp_mode == "自定义":
-        pp_w = st.number_input("宽 (Width)", value=1080, key="pp_cw")
-        pp_h = st.number_input("高 (Height)", value=1920, key="pp_ch")
+        pp_w = st.number_input("宽 (Width)", value=1080, key="pp_cw", disabled=is_locked)
+        pp_h = st.number_input("高 (Height)", value=1920, key="pp_ch", disabled=is_locked)
     elif "横屏" in pp_mode:
         pp_w, pp_h = 1920, 1080
     else:
         pp_w, pp_h = 1080, 1920
     
-    overwrite_src = st.checkbox("⚠️ 覆盖原文件 (Overwrite)", value=True, help="警告：处理成功后将直接替换原始文件，操作不可逆！")
+    overwrite_src = st.checkbox("⚠️ 覆盖原文件 (Overwrite)", value=True, help="警告：处理成功后将直接替换原始文件，操作不可逆！", disabled=is_locked)
         
-    if st.button("🚀 开始处理"):
+    if st.button("🚀 开始处理", disabled=is_locked):
         src_dir = os.path.join(ASSETS_DIR, "video")
         
         if not os.path.exists(src_dir):
@@ -285,18 +321,18 @@ with col1:
     ukey = st.session_state['uploader_key']
     
     with st.form("add_task_form", clear_on_submit=True):
-        uploaded_audio = st.file_uploader("音频文件 (必选)", type=['mp3', 'wav', 'm4a'], key=f"audio_{ukey}")
-        uploaded_srt = st.file_uploader("字幕文件 (可选, 留空自动生成)", type=['srt'], key=f"srt_{ukey}")
-        task_count = st.number_input("生成数量", min_value=1, value=config.get("batch_count", 1), key=f"cnt_{ukey}")
+        uploaded_audio = st.file_uploader("音频文件 (必选)", type=['mp3', 'wav', 'm4a'], key=f"audio_{ukey}", disabled=is_locked)
+        uploaded_srt = st.file_uploader("字幕文件 (可选, 留空自动生成)", type=['srt'], key=f"srt_{ukey}", disabled=is_locked)
+        task_count = st.number_input("生成数量", min_value=1, value=config.get("batch_count", 1), key=f"cnt_{ukey}", disabled=is_locked)
         
         st.markdown("**👉 转场设置 (Transition)**")
         c_t1, c_t2 = st.columns(2)
         with c_t1:
-            trans_type = st.selectbox("转场类型", ["无 (Hard Cut)", "叠化 (Crossfade)", "闪黑 (Fade to Black)"], index=0, key=f"tt_{ukey}")
+            trans_type = st.selectbox("转场类型", ["无 (Hard Cut)", "叠化 (Crossfade)", "闪黑 (Fade to Black)"], index=0, key=f"tt_{ukey}", disabled=is_locked)
         with c_t2:
-            trans_dur = st.number_input("转场时长 (秒)", min_value=0.1, max_value=2.0, value=0.5, step=0.1, key=f"td_{ukey}", disabled=(trans_type=="无 (Hard Cut)"))
+            trans_dur = st.number_input("转场时长 (秒)", min_value=0.1, max_value=2.0, value=0.5, step=0.1, key=f"td_{ukey}", disabled=(trans_type=="无 (Hard Cut)") or is_locked)
 
-        submitted = st.form_submit_button("➕ 添加到队列")
+        submitted = st.form_submit_button("➕ 添加到队列", disabled=is_locked)
         
         if submitted:
             if not uploaded_audio:
@@ -346,98 +382,142 @@ with col2:
         render_queue_dataframe(queue_placeholder)
         
         c_act1, c_act2 = st.columns(2)
-        if c_act1.button("🗑️ 清空队列"):
+        if c_act1.button("🗑️ 清空队列", disabled=is_locked):
             st.session_state['task_queue'] = []
             st.rerun()
         
-        start_btn = c_act2.button("🎬 开始批量生成", type="primary")
-
-# --- Execution Area ---
-st.divider()
-
-if 'start_btn' in locals() and start_btn:
-    if not folder_weights:
-        st.error("错误：未配置视频素材权重。请在侧边栏设置。")
-    elif not st.session_state['task_queue']:
-        st.error("错误：队列为空。")
-    else:
-        pipeline = AutoClipPipeline(ASSETS_DIR, OUTPUT_DIR)
-        
-        main_progress = st.progress(0)
-        main_status = st.empty()
-        
-        total_tasks = len(st.session_state['task_queue'])
-        all_results = []
-        
-        start_time_global = time.time()
-        
-        for idx, task in enumerate(st.session_state['task_queue']):
-            task_id = idx + 1
-            main_status.markdown(f"### 正在处理任务 {task_id}/{total_tasks}: {task['audio_name']}")
-            
-            # Construct Config for this task
-            mix_config = MixConfig(
-                audio_path=task['audio_path'],
-                srt_path=task['srt_path'],
-                folder_weights=folder_weights,
-                batch_count=task['count'],
-                bgm_file=None if bgm_selected == "无 (None)" else bgm_selected,
-                width=vid_width,
-                height=vid_height,
-                subtitle_font_name=sub_font_name,
-                subtitle_font_size=sub_font_size,
-                subtitle_color=sub_color,
-                subtitle_outline=sub_outline,
-                subtitle_shadow=sub_shadow,
-                subtitle_margin_v=sub_margin_v,
-                subtitle_bold=sub_bold,
-                output_tag=output_tag,
-                # Fix: Extract English key from "中文 (English)" format
-                transition_type=task.get('trans_type', "无").split("(")[-1].strip(")") if "(" in task.get('trans_type', "") else "None",
-                transition_duration=task.get('trans_dur', 0.5)
-            )
-            
-            # Progress Callback wrapper
-            def task_progress(p, msg):
-                # Map task progress (0-1) to global progress slot for this task
-                global_p = (idx + p) / total_tasks
-                main_progress.progress(min(global_p, 1.0))
-                # Optional: Show detailed sub-status if needed
-            
-            try:
-                results = pipeline.run(mix_config, progress_callback=task_progress)
-                task['status'] = 'Done'
-                render_queue_dataframe(queue_placeholder)
-                all_results.extend(results)
-                st.success(f"任务 {task_id} 完成! 生成 {len(results)} 个视频。")
-                
-            except Exception as e:
-                task['status'] = 'Error'
-                render_queue_dataframe(queue_placeholder)
-                st.error(f"任务 {task['audio_name']} 失败: {e}")
-                
-        main_progress.progress(1.0)
-        main_status.success(f"✅ 所有任务完成！总耗时: {time.time() - start_time_global:.1f}s")
-        
-        # Display Results
-        st.write("---")
-        st.subheader("生成结果预览")
-        
-        if not all_results:
-            st.warning("无视频生成。")
+        # Start Button Logic
+        if not is_locked:
+            start_btn = c_act2.button("🎬 开始批量生成", type="primary")
+            if start_btn:
+                # Basic Checks
+                if not folder_weights:
+                     st.error("错误：未配置视频素材权重。")
+                elif not st.session_state['task_queue']:
+                     st.error("错误：队列为空。")
+                else:
+                    st.session_state['is_running'] = True
+                    st.rerun()
         else:
-             for i in range(0, len(all_results), 2):
-                cols = st.columns(2)
-                with cols[0]:
-                    st.write(f"📁 `{os.path.basename(all_results[i])}`")
-                    st.video(all_results[i])
-                    display_metadata(all_results[i])
-                
-                if i + 1 < len(all_results):
-                    with cols[1]:
-                        st.write(f"📁 `{os.path.basename(all_results[i+1])}`")
-                        st.video(all_results[i+1])
-                        display_metadata(all_results[i+1])
+            c_act2.button("⏳ 正在生成... (UI已锁定)", disabled=True)
+
+
+# --- Execution Logic (Auto Triggered if Locked) ---
+if st.session_state.get('is_running'):
+    st.divider()
+    
+    # Safety Check
+    if not folder_weights or not st.session_state['task_queue']:
+        st.error("执行状态异常：配置或队列丢失。")
+        st.session_state['is_running'] = False
+        st.rerun()
+        st.stop()
+    
+    pipeline = AutoClipPipeline(ASSETS_DIR, OUTPUT_DIR)
+    
+    main_progress = st.progress(0)
+    main_status = st.empty()
+    
+    total_tasks = len(st.session_state['task_queue'])
+    all_results = []
+    
+    start_time_global = time.time()
+    
+    for idx, task in enumerate(st.session_state['task_queue']):
+        task_id = idx + 1
+        main_status.markdown(f"### 正在处理任务 {task_id}/{total_tasks}: {task['audio_name']}")
+        
+        # Construct Config for this task
+        mix_config = MixConfig(
+            audio_path=task['audio_path'],
+            srt_path=task['srt_path'],
+            folder_weights=folder_weights,
+            batch_count=task['count'],
+            bgm_file=None if bgm_selected == "无 (None)" else bgm_selected,
+            width=vid_width,
+            height=vid_height,
+            subtitle_font_name=sub_font_name,
+            subtitle_font_size=sub_font_size,
+            subtitle_color=sub_color,
+            subtitle_outline=sub_outline,
+            subtitle_shadow=sub_shadow,
+            subtitle_margin_v=sub_margin_v,
+            subtitle_bold=sub_bold,
+            output_tag=output_tag,
+            # Fix: Extract English key from "中文 (English)" format
+            transition_type=task.get('trans_type', "无").split("(")[-1].strip(")") if "(" in task.get('trans_type', "") else "None",
+            transition_duration=task.get('trans_dur', 0.5)
+        )
+        
+        # Progress Callback wrapper
+        def task_progress(p, msg):
+            # Map task progress (0-1) to global progress slot for this task
+            global_p = (idx + p) / total_tasks
+            main_progress.progress(min(global_p, 1.0))
+            # Optional: Show detailed sub-status if needed
+        
+        try:
+            results = pipeline.run(mix_config, progress_callback=task_progress)
+            task['status'] = 'Done'
+            render_queue_dataframe(queue_placeholder)
+            all_results.extend(results)
+            st.success(f"任务 {task_id} 完成! 生成 {len(results)} 个视频。")
+            
+        except Exception as e:
+            task['status'] = 'Error'
+            render_queue_dataframe(queue_placeholder)
+            st.error(f"任务 {task['audio_name']} 失败: {e}")
+            
+    main_progress.progress(1.0)
+    main_status.success(f"✅ 所有任务完成！总耗时: {time.time() - start_time_global:.1f}s")
+    
+    # PERSIST RESULTS into Session State
+    st.session_state['generated_results'] = all_results
+    
+    # Unlock and Rerun to restore UI
+    st.session_state['is_running'] = False
+    
+    # Small delay for user to see success msg? 
+    # Actually, st.rerun() will wipe the success message unless we persist it.
+    # But persisted results area below will show the videos.
+    # Let's toast? st.toast is available in new Streamlit.
+    try:
+        st.toast("所有任务处理完成！")
+    except: pass
+    
+    st.rerun()
+
+# --- Execution Area (Old button block removed) ---
+# st.divider()
+# if 'start_btn' in locals() and start_btn: ... (Removed)
+
+# --- Results Display (Persisted) ---
+if st.session_state.get('generated_results'):
+    st.write("---")
+    st.subheader("生成结果预览 (Results)")
+    
+    # Optional: Clear button
+    if st.button("清空结果预览"):
+        del st.session_state['generated_results']
+        st.rerun()
+    
+    res_files = st.session_state['generated_results']
+    
+    if not res_files:
+        st.warning("结果列表为空。")
+    else:
+         for i in range(0, len(res_files), 2):
+            cols = st.columns(2)
+            with cols[0]:
+                st.write(f"📁 `{os.path.basename(res_files[i])}`")
+                st.video(res_files[i])
+                display_metadata(res_files[i])
+            
+            if i + 1 < len(res_files):
+                with cols[1]:
+                    st.write(f"📁 `{os.path.basename(res_files[i+1])}`")
+                    st.video(res_files[i+1])
+                    display_metadata(res_files[i+1])
 
 # --- Handle Save Config ---
 if st.session_state.get('save_config_requested'):
@@ -459,7 +539,8 @@ if st.session_state.get('save_config_requested'):
         "sub_margin_v": sub_margin_v,
         # Folders
         "ordered_folders": st.session_state.get("ordered_folders_multiselect", []),
-        "folder_weights": current_weights_map
+        "folder_weights": current_weights_map,
+        "use_random_cuts": use_random_cuts
     }
     
     if cm.save_config(new_config):

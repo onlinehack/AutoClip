@@ -112,6 +112,8 @@ class AutoClipPipeline:
                 timeline_blocks.append({
                     "folder": os.path.join(self.assets_dir, "video", fw.folder),
                     "speed": fw.speed, # Pass speed config
+                    "clip_min_duration": fw.clip_min_duration,
+                    "clip_max_duration": fw.clip_max_duration,
                     "start": current_t,
                     "end": current_t + duration_share
                 })
@@ -159,6 +161,8 @@ class AutoClipPipeline:
                         "end": next_t,
                         "folder": folder,
                         "speed": speed,
+                        "clip_min_duration": block.get("clip_min_duration", 0.0),
+                        "clip_max_duration": block.get("clip_max_duration", 0.0),
                         "duration": next_t - curr,
                         "is_block_start": is_block_start,
                         "is_block_end": is_block_end,
@@ -279,17 +283,38 @@ class AutoClipPipeline:
                     needed_duration = duration + pad_head + pad_tail
                     
                     # The duration we FETCH from source (raw time)
+                    # The duration we FETCH from source (raw time)
                     # If speed is 2.0 (faster), we need 2x source material to fill the time.
                     # If speed is 0.5 (slower), we need 0.5x source material.
                     fetch_duration_source = needed_duration * speed_factor
+                    
+                    # Random Cut Params (default to 0 if not set)
+                    clip_min = task.get("clip_min_duration", 0.0)
+                    clip_max = task.get("clip_max_duration", 0.0)
                     
                     # Get Video Clip (Main Thread - SAFE)
                     video_clip = None
                     try:
                         if folder:
-                            # print(f"[{datetime.now()}] [Pipeline] Searching clip...")
-                            # Fetch correct source length based on speed
-                            video_clip, segment_meta = self.matcher.get_ordered_clip(folder, fetch_duration_source)
+                            # Decide between Random Cuts vs Ordered Stream
+                            if clip_min > 0.1 and clip_max > clip_min:
+                                # Use Random Cuts
+                                # Note: get_random_cut_clip returns a concatenated clip of random parts
+                                video_clip, segment_meta = self.matcher.get_random_cut_clip(
+                                    folder, 
+                                    fetch_duration_source, 
+                                    clip_min * speed_factor, # Scale limits to source time? No, usually limits are visual. 
+                                    # Wait. A 2s visual clip at 2x speed needs 4s source.
+                                    # So min_dur/max_dur should be SCALED if we apply speed AFTER.
+                                    # Actually get_random_cut_clip assembles SOURCE clips.
+                                    # If we want final visual clip to be 2-4s:
+                                    # Source clip needs to be 4-8s (at 2x speed).
+                                    # So we pass scaled limits.
+                                    clip_max * speed_factor
+                                )
+                            else:
+                                # Use Ordered Stream
+                                video_clip, segment_meta = self.matcher.get_ordered_clip(folder, fetch_duration_source)
                             
                             if video_clip:
                                 batch_metadata.append({
