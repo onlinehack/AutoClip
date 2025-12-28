@@ -2,9 +2,11 @@ import random
 import os
 from typing import List, Dict, Optional
 from moviepy.editor import VideoFileClip, vfx, concatenate_videoclips
-from datetime import datetime
 from src.models import FolderWeight
 from src.utils import get_video_files
+from src.logger import setup_logger
+
+logger = setup_logger("Matcher")
 
 class Matcher:
     def __init__(self, assets_dir: str):
@@ -15,7 +17,7 @@ class Matcher:
     def _init_folder_state(self, folder_path: str):
         if folder_path not in self.folder_states:
             videos = sorted(get_video_files(folder_path)) # Sort by name
-            print(f"[{datetime.now()}] [Matcher] Initialized folder: {os.path.basename(folder_path)} | Found {len(videos)} videos.")
+            logger.info(f"Initialized folder: {os.path.basename(folder_path)} | Found {len(videos)} videos.")
             self.folder_states[folder_path] = {
                 'videos': videos,
                 'current_vid_idx': 0,
@@ -47,7 +49,7 @@ class Matcher:
             try:
                 # Load clip efficiently? Warning: VideoFileClip can be slow if opened repeatedly
                 # But we need duration.
-                print(f"[{datetime.now()}] [Matcher] Loading source video: {os.path.basename(video_path)} (Idx: {state['current_vid_idx']})")
+                logger.info(f"Loading source video: {os.path.basename(video_path)} (Idx: {state['current_vid_idx']})")
                 # In a persistent app, we might cache these objects, but here we just open/close.
                 full_clip = VideoFileClip(video_path)
                 video_len = full_clip.duration
@@ -60,7 +62,7 @@ class Matcher:
                 if available_time <= 0:
                     # Current video finished exactly or we overshot?
                     # Move to next video
-                    print(f"[{datetime.now()}] [Matcher] Video finished (Exact/Over). Moving to next.")
+                    logger.info("Video finished (Exact/Over). Moving to next.")
                     state['current_vid_idx'] = (state['current_vid_idx'] + 1) % len(videos)
                     state['current_time'] = 0.0
                     full_clip.close() 
@@ -79,7 +81,7 @@ class Matcher:
                     "duration": take_time
                 })
                 
-                print(f"[{datetime.now()}] [Matcher] Selected segment: {take_time:.2f}s from {start_t:.2f}s to {start_t + take_time:.2f}s")
+                logger.info(f"Selected segment: {take_time:.2f}s from {start_t:.2f}s to {start_t + take_time:.2f}s")
                 
                 # Update State
                 state['current_time'] += take_time
@@ -91,7 +93,7 @@ class Matcher:
                     state['current_time'] = 0.0
                     
             except Exception as e:
-                print(f"[{datetime.now()}] [Matcher] Error reading video {video_path}: {e}")
+                logger.error(f"Error reading video {video_path}: {e}")
                 # Skip to next video on error
                 state['current_vid_idx'] = (state['current_vid_idx'] + 1) % len(videos)
                 state['current_time'] = 0.0
@@ -186,10 +188,10 @@ class Matcher:
                 })
                 
                 current_len += actual_dur
-                print(f"[{datetime.now()}] [Matcher] Random cut: {os.path.basename(vid_path)} [{start_t:.2f}s - {start_t + actual_dur:.2f}s] (Dur: {actual_dur:.2f}s) | Progress: {current_len:.1f}/{target_total_duration:.1f}")
+                logger.info(f"Random cut: {os.path.basename(vid_path)} [{start_t:.2f}s - {start_t + actual_dur:.2f}s] (Dur: {actual_dur:.2f}s) | Progress: {current_len:.1f}/{target_total_duration:.1f}")
                 
             except Exception as e:
-                print(f"[{datetime.now()}] [Matcher] Error reading {vid_path}: {e}")
+                logger.error(f"Error reading {vid_path}: {e}")
                 safety_break += 1
         
         if not clips_to_concat:

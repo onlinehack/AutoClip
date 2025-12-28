@@ -12,6 +12,9 @@ from src.models import MixConfig
 # from src.utils import split_text # No longer needed
 from src.processors.asr import generate_srt
 from src.processors.matcher import Matcher
+from src.logger import setup_logger
+
+logger = setup_logger("Pipeline")
 
 class AutoClipPipeline:
     def __init__(self, assets_dir: str, output_dir: str):
@@ -27,8 +30,9 @@ class AutoClipPipeline:
         cpu_cores = os.cpu_count() or 16
         # Limit threads to reasonable max for FFmpeg (usually diminishing returns > 32, but let's allow up to 32 or full usage)
         # For Xeon, using all cores is generally desired.
+        # For Xeon, using all cores is generally desired.
         render_threads = max(4, cpu_cores)
-        print(f"[{datetime.now()}] [Pipeline] Multi-core Optimization: Using {render_threads} threads for encoding.")
+        logger.info(f"Multi-core Optimization: Using {render_threads} threads for encoding.")
         
         # Extract audio identifier
         audio_stem = os.path.splitext(os.path.basename(config.audio_path))[0]
@@ -44,8 +48,8 @@ class AutoClipPipeline:
                 
         batch_dir = os.path.join(self.output_dir, folder_name)
         os.makedirs(batch_dir, exist_ok=True)
-        print(f"[{datetime.now()}] [Pipeline] Output Directory: {batch_dir}")
-        print(f"[{datetime.now()}] [Pipeline] Config: BatchCount={config.batch_count}, Resolution={config.width}x{config.height}")
+        logger.info(f"Output Directory: {batch_dir}")
+        logger.info(f"Config: BatchCount={config.batch_count}, Resolution={config.width}x{config.height}")
         
         # Determine SRT path
         srt_path = config.srt_path
@@ -54,31 +58,30 @@ class AutoClipPipeline:
             if progress_callback:
                 progress_callback(0.05, "Auto-generating Subtitles (FunASR)...")
             
-            print(f"[{datetime.now()}] [Pipeline] ASR start for {config.audio_path}...")
+            logger.info(f"ASR start for {config.audio_path}...")
             srt_name = f"generated_{timestamp}.srt"
             srt_path = os.path.join(batch_dir, srt_name)
-            srt_path = os.path.join(batch_dir, srt_name)
             generate_srt(config.audio_path, srt_path)
-            print(f"[{datetime.now()}] [Pipeline] ASR completed. Output: {srt_path}")
+            logger.info(f"ASR completed. Output: {srt_path}")
             
         # Load Audio
         time.sleep(1) # Give system a moment
         if progress_callback:
             progress_callback(0.1, "Loading Assets...")
             
-        print(f"[{datetime.now()}] [Pipeline] Validating Audio Duration: {config.audio_path}")
+        logger.info(f"Validating Audio Duration: {config.audio_path}")
         try:
             with AudioFileClip(config.audio_path) as temp_audio:
                 total_duration = temp_audio.duration
-            print(f"[{datetime.now()}] Audio duration: {total_duration}s")
+            logger.info(f"Audio duration: {total_duration}s")
         except Exception as e:
-            print(f"[{datetime.now()}] Error loading audio: {e}")
+            logger.error(f"Error loading audio: {e}")
             raise e
         
         # Load SRT
-        print(f"[{datetime.now()}] [Pipeline] Loading SRT: {srt_path}")
+        logger.info(f"Loading SRT: {srt_path}")
         subs = pysrt.open(srt_path)
-        print(f"[{datetime.now()}] [Pipeline] SRT loaded. {len(subs)} lines.")
+        logger.info(f"SRT loaded. {len(subs)} lines.")
         
         # Old segments logic removed.
 
@@ -86,7 +89,7 @@ class AutoClipPipeline:
         generated_files = []
 
         for i in range(config.batch_count):
-            print(f"[{datetime.now()}] [Pipeline] === Starting Batch {i+1}/{config.batch_count} ===")
+            logger.info(f"=== Starting Batch {i+1}/{config.batch_count} ===")
             
             # Reload audio for each batch to ensure fresh file handles
             main_audio = AudioFileClip(config.audio_path)
@@ -123,7 +126,7 @@ class AutoClipPipeline:
             if timeline_blocks:
                 timeline_blocks[-1]["end"] = max(total_duration, timeline_blocks[-1]["end"])
             
-            print(f"[{datetime.now()}] [Pipeline] Timeline planned with {len(timeline_blocks)} blocks.")
+            logger.info(f"Timeline planned with {len(timeline_blocks)} blocks.")
 
             # 2. Assemble Video Tracks - RENDER CHUNKS IMMEDIATELY TO AVOID OOM
             temp_parts_dir = os.path.join(batch_dir, "parts")
@@ -186,7 +189,7 @@ class AutoClipPipeline:
             
             THREADS_PER_JOB = max(2, cpu_cores // MAX_WORKERS)
             
-            print(f"[{datetime.now()}] [Pipeline] Parallel Rendering: {MAX_WORKERS} workers, {THREADS_PER_JOB} threads/worker.")
+            logger.info(f"Parallel Rendering: {MAX_WORKERS} workers, {THREADS_PER_JOB} threads/worker.")
             
             def render_chunk_worker(idx, task, video_clip, output_path, threads_count):
                 """Worker function to render a single chunk."""
@@ -195,7 +198,7 @@ class AutoClipPipeline:
                     # Note: We passed the configured clip.
                     
                     # RENDER PART (VIDEO ONLY)
-                    print(f"[{datetime.now()}] [Worker-{idx}] Rendering video part to {output_path}...")
+                    logger.info(f"[Worker-{idx}] Rendering video part to {output_path}...")
                     
                     video_clip.write_videofile(
                         output_path, 
@@ -217,7 +220,7 @@ class AutoClipPipeline:
                         "chunk_index": idx
                     }
                 except Exception as e:
-                    print(f"[{datetime.now()}] [Worker-{idx}] Error: {e}")
+                    logger.error(f"[Worker-{idx}] Error: {e}")
                     raise e
                 finally:
                     # CLEANUP inside worker to ensure it closes after use
@@ -252,7 +255,7 @@ class AutoClipPipeline:
                         progress_callback(0.2 + 0.6 * (idx / len(render_tasks)), msg)
 
                     speed_factor = task.get("speed", 1.0)
-                    print(f"[{datetime.now()}] [Pipeline] [Batch {i+1}] Preparing Chunk {idx+1}/{len(render_tasks)} (Speed: {speed_factor}x)")
+                    logger.info(f"[Batch {i+1}] Preparing Chunk {idx+1}/{len(render_tasks)} (Speed: {speed_factor}x)")
                     
                     chunk_start = task["start"]
                     chunk_end = task["end"]
@@ -328,7 +331,7 @@ class AutoClipPipeline:
                                 })
                         
                         if not video_clip:
-                             print(f"[{datetime.now()}] Warning: No video found for chunk {idx}, using placeholder.")
+                             logger.warning(f"No video found for chunk {idx}, using placeholder.")
                              video_clip = ColorClip(size=(config.width, config.height), color=(0,0,0), duration=needed_duration)
                         else:
                             # Resize/Crop
@@ -355,7 +358,7 @@ class AutoClipPipeline:
                         futures.append(future)
                         
                     except Exception as e:
-                        print(f"[{datetime.now()}] Error preparing chunk {idx}: {e}")
+                        logger.error(f"Error preparing chunk {idx}: {e}")
                         raise e
 
                 # Wait for all remaining
@@ -365,7 +368,7 @@ class AutoClipPipeline:
                     # We used 'idx' in filename so we can sort later or store in dict.
                     pass
             
-            print(f"[{datetime.now()}] [Pipeline] All chunks rendered. Collecting results...")
+            logger.info("All chunks rendered. Collecting results...")
             
             # Reconstruct ordered list
             # We can re-scan the dir or build from futures if we tracked them.
@@ -395,7 +398,7 @@ class AutoClipPipeline:
             if not part_files:
                 continue
                 
-            print(f"[{datetime.now()}] [Pipeline] All chunks rendered. Concatenating {len(part_files)} parts...")
+            logger.info(f"All chunks rendered. Concatenating {len(part_files)} parts...")
             
             # Load all parts
             clip_objects = []
@@ -500,11 +503,11 @@ class AutoClipPipeline:
                     else:
                         logical_blocks.append(concatenate_videoclips(current_group, method="compose"))
                         
-                print(f"[{datetime.now()}] [Pipeline] Assembled {len(logical_blocks)} logical blocks (scenes).")
+                logger.info(f"Assembled {len(logical_blocks)} logical blocks (scenes).")
 
                 # 3. Apply Transitions between Logical Blocks
                 if config.transition_type == "Crossfade" and len(logical_blocks) > 1:
-                    print(f"[{datetime.now()}] [Pipeline] Applying CROSSFADE (Duration: {config.transition_duration}s)...")
+                    logger.info(f"Applying CROSSFADE (Duration: {config.transition_duration}s)...")
                     
                     # We need to apply .crossfadein() to blocks 1..N
                     # And use negative padding during concat.
@@ -536,7 +539,7 @@ class AutoClipPipeline:
                     # So we just concat them linearly.
                     # Optimization: Use 'chain' instead of 'compose' for linear concatenation.
                     # 'chain' avoids the overhead of CompositeVideoClip frame blending logic.
-                    print(f"[{datetime.now()}] [Pipeline] Concatenating blocks linearly (Method: Chain). (Config Type: '{config.transition_type}')")
+                    logger.info(f"Concatenating blocks linearly (Method: Chain). (Config Type: '{config.transition_type}')")
                     final_video_visual = concatenate_videoclips(logical_blocks, method="chain")
                 
                 # Set Audio
@@ -548,17 +551,17 @@ class AutoClipPipeline:
                       # If video is way longer, it might be due to excess padding accumulation error?
                       # Or simply original strategy.
                       # We clip to audio.
-                     print(f"[{datetime.now()}] Video ({final_video_visual.duration:.2f}s) > Audio ({final_duration:.2f}s). Clipping video.")
+                     logger.warning(f"Video ({final_video_visual.duration:.2f}s) > Audio ({final_duration:.2f}s). Clipping video.")
                      final_video_visual = final_video_visual.subclip(0, final_duration)
                 elif final_video_visual.duration < final_duration:
-                     print(f"[{datetime.now()}] Video ({final_video_visual.duration}s) < Audio ({final_duration}s). Padding video (or letting it hold).")
+                     logger.warning(f"Video ({final_video_visual.duration}s) < Audio ({final_duration}s). Padding video (or letting it hold).")
                      final_video_visual = final_video_visual.set_duration(final_duration)
                      
                 # Overlay Subtitles Globally
                 # Subtitles will be burnt in via FFmpeg filter during write_videofile
                 if progress_callback:
                     progress_callback(0.9, f"Batch {i+1}: Preparing subtitle filter...")
-                print(f"[{datetime.now()}] Subtitles will be added via ffmpeg filter.")
+                logger.info("Subtitles will be added via ffmpeg filter.")
 
                 final_video = final_video_visual.set_audio(main_audio)
                 
@@ -576,8 +579,8 @@ class AutoClipPipeline:
                         final_video = final_video.set_audio(final_audio)
 
                 output_filename = os.path.join(batch_dir, f"batch_{i+1}.mp4")
-                print(f"[{datetime.now()}] [Pipeline] Saving Final Video to {output_filename}")
-                print(f"[{datetime.now()}] [Pipeline] This step includes FFmpeg encoding and burning subtitles. Please wait...")
+                logger.info(f"Saving Final Video to {output_filename}")
+                logger.info("This step includes FFmpeg encoding and burning subtitles. Please wait...")
 
                 if progress_callback:
                     progress_callback(0.95, f"Batch {i+1}: Encoding final video (this may take a while)...")
@@ -586,15 +589,15 @@ class AutoClipPipeline:
                 # Use forward slashes and ensure absolute path for filter
                 srt_abspath = os.path.abspath(srt_path)
                 
-                print(f"\n[{datetime.now()}] --- Subtitle Debug Info ---")
-                print(f"Environment: {os.name} (posix=Linux/Mac, nt=Windows)")
-                print(f"Original SRT Path: {srt_path}")
-                print(f"Absolute SRT Path: {srt_abspath}")
+                logger.info("--- Subtitle Debug Info ---")
+                logger.info(f"Environment: {os.name} (posix=Linux/Mac, nt=Windows)")
+                logger.info(f"Original SRT Path: {srt_path}")
+                logger.info(f"Absolute SRT Path: {srt_abspath}")
                 
                 if os.path.exists(srt_abspath):
-                    print(f"SRT File Exists. Size: {os.path.getsize(srt_abspath)} bytes")
+                    logger.info(f"SRT File Exists. Size: {os.path.getsize(srt_abspath)} bytes")
                 else:
-                    print(f"CRITICAL: SRT file does NOT exist at {srt_abspath}")
+                    logger.error(f"CRITICAL: SRT file does NOT exist at {srt_abspath}")
 
                 # Default to original
                 final_srt_path = srt_abspath
@@ -603,7 +606,7 @@ class AutoClipPipeline:
                 # Shifting by -0.5 seconds to appear EARLIER (counteract lag)
                 SHIFT_SECONDS = -0.5
                 try:
-                    print(f"[{datetime.now()}] Applying {SHIFT_SECONDS}s shift to subtitles (Advanced/Earlier)...")
+                    logger.info(f"Applying {SHIFT_SECONDS}s shift to subtitles (Advanced/Earlier)...")
                     
                     # Open the ORIGINAL (or current) SRT to shift it
                     subs_obj = pysrt.open(srt_abspath)
@@ -614,10 +617,10 @@ class AutoClipPipeline:
                     subs_obj.save(shifted_srt_path, encoding='utf-8')
                     
                     final_srt_path = os.path.abspath(shifted_srt_path)
-                    print(f"[{datetime.now()}] Subtitles shifted. Using NEW SRT file: {final_srt_path}")
+                    logger.info(f"Subtitles shifted. Using NEW SRT file: {final_srt_path}")
                 except Exception as e:
-                    print(f"[{datetime.now()}] Error shifting subtitles: {e}")
-                    print(f"[{datetime.now()}] Fallback to ORIGINAL SRT: {final_srt_path}")
+                    logger.error(f"Error shifting subtitles: {e}")
+                    logger.warning(f"Fallback to ORIGINAL SRT: {final_srt_path}")
 
                 # Path formatting for FFmpeg 'subtitles' filter
                 # 1. Normalize slashes to forward slashes (works on both Linux and Windows for FFmpeg)
@@ -628,7 +631,7 @@ class AutoClipPipeline:
                     # On Windows, 'C:/' -> 'C\:/' for filter escaping
                     srt_filter_path = srt_filter_path.replace(':', '\\:')
                 
-                print(f"Escaped Path for Filter: {srt_filter_path}")
+                logger.info(f"Escaped Path for Filter: {srt_filter_path}")
                 
                 # Convert color from valid Hex #RRGGBB to ASS &H00BBGGRR
                 def hex_to_ass(hex_color):
@@ -656,8 +659,8 @@ class AutoClipPipeline:
                     '-vf', 
                     f"subtitles='{srt_filter_path}':force_style='{style_str}'"
                 ]
-                print(f"Final ffmpeg_params output: {ffmpeg_params}")
-                print(f"---------------------------------\n")
+                logger.info(f"Final ffmpeg_params: {ffmpeg_params}")
+                logger.info("---------------------------------\n")
                 
                 # Write file
                 final_video.write_videofile(
@@ -670,7 +673,7 @@ class AutoClipPipeline:
                     logger=None,
                     ffmpeg_params=ffmpeg_params
                 )
-                print(f"[{datetime.now()}] [Pipeline] Video encoding finished: {output_filename}")
+                logger.info(f"Video encoding finished: {output_filename}")
                 generated_files.append(output_filename)
                 
                 # Save Metadata
@@ -678,9 +681,9 @@ class AutoClipPipeline:
                 try:
                     with open(meta_filename, 'w', encoding='utf-8') as f:
                         json.dump(batch_metadata, f, indent=2, ensure_ascii=False)
-                    print(f"[{datetime.now()}] Metadata saved to {meta_filename}")
+                    logger.info(f"Metadata saved to {meta_filename}")
                 except Exception as e:
-                    print(f"Error saving metadata: {e}")
+                    logger.error(f"Error saving metadata: {e}")
                 
             finally:
                 # Close all clips
