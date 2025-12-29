@@ -179,15 +179,12 @@ class AutoClipPipeline:
             # Parallel Rendering Setup
             import concurrent.futures
             
-            # Heuristic: 
-            # - Xeon has many cores. 
-            # - FFmpeg efficient up to ~8-16 threads.
-            # - Too many parallel FFmpeg instances choke IO.
-            # Strategy: 4 parallel renders, each using (Cores/4) threads.
-            MAX_WORKERS = max(1, cpu_cores // 4)
-            if MAX_WORKERS > 4: MAX_WORKERS = 4 # Cap at 4 parallel encodes to avoid IO thrashing
-            
-            THREADS_PER_JOB = max(2, cpu_cores // MAX_WORKERS)
+            # Optimization for High-Core CPUs (e.g., Xeon)
+            # - Use more workers, but limit threads per worker to avoid context switch overhead.
+            # Allow up to 16 workers if cores allow (preserving some for system)
+            MAX_WORKERS = max(2, min(16, cpu_cores // 2)) 
+            # Each worker gets remaining threads distributed, but capped at 4-6 is usually sweet spot for 1080p
+            THREADS_PER_JOB = max(2, min(8, int(cpu_cores / MAX_WORKERS)))
             
             logger.info(f"Parallel Rendering: {MAX_WORKERS} workers, {THREADS_PER_JOB} threads/worker.")
             
@@ -400,290 +397,295 @@ class AutoClipPipeline:
                 
             logger.info(f"All chunks rendered. Concatenating {len(part_files)} parts...")
             
-            # Load all parts
-            clip_objects = []
+            # Determine if we can use Fast Path (Direct FFmpeg Concat)
+            # We can use fast path if Config is NOT Crossfade.
+            # Fade to Black and None are baked into chunks, so linear concat works.
+            use_fast_path = (config.transition_type != "Crossfade")
+            
+            # --- START SUBTITLE PREPARATION (Common) ---
+            # Prepare subtitle filter args
+            # Use forward slashes and ensure absolute path for filter
+            srt_abspath = os.path.abspath(srt_path)
+            
+            if not os.path.exists(srt_abspath):
+                 logger.error(f"CRITICAL: SRT file does NOT exist at {srt_abspath}")
+            
+            # Default to original
+            final_srt_path = srt_abspath
+            
+            # Offset Logic
+            SHIFT_SECONDS = -0.5
             try:
-                # We need to construct the list carefully for Crossfade
-                # If Crossfade, we need to apply crossfadein to clips that have pad_head > 0? 
-                # Actually, concatenate_videoclips with negative padding simply overlaps them.
-                # If Part A has tail padding (overlap) and Part B has head padding (overlap).
-                # We simply concat them with padding = -overlap.
-                # BUT, render_tasks might be disjointed (chunks). We only want negative padding at Block Boundaries.
+                # Check if we already shifted? Only do it once or unique per batch?
+                # Ideally we do it once per run, but we are in a loop.
+                # To avoid re-shifting multiple times if we reused srt_path, 
+                # we should check if we already created a shifted file.
+                shifted_srt_name = f"shifted_{os.path.basename(srt_path)}"
+                shifted_srt_path = os.path.join(batch_dir, shifted_srt_name)
                 
-                # Logic:
-                # 1. Iterate parts.
-                # 2. If part is Start of Block (and not first block), it means previous part was End of Block.
-                # 3. If config is Crossfade, we overlap them.
-                
-                # However, concatenate_videoclips takes a single list and a single 'padding' arg (if int/float).
-                # If we provide a LIST of paddings to 'padding' arg? MoviePy docs say padding is float.
-                # So we cannot mix hard cuts (chunks) and crossfades (blocks) easily with one call if we use simple padding.
-                
-                # WAITING: MoviePy `concatenate_videoclips` creates a CompositeVideoClip logic. 
-                # Implementing complex transition per-clip requires manual composition or building a custom list.
-                # EASIER METHOD:
-                # Use `concatenate_videoclips` but apply `crossfadein` effect to the clip itself? 
-                # `clip.crossfadein(d)` makes the clip fade in from the previous clip in the composite. 
-                # It automatically handles the overlap logic when composed.
-                # BUT, for `concatenate_videoclips`, we must enable `method='compose'` and likely pass padding.
-                
-                # If we cannot vary padding per clip in one call, we must chain them?
-                # or use `method='chain'`? No, chain doesn't support overlap.
-                
-                # Let's try to set attributes on clips.
-                
-                final_clips = []
-                for idx, p_info in enumerate(part_files):
-                    c = VideoFileClip(p_info["file"])
-                    
-                    if config.transition_type == "Crossfade":
-                        # If this clip is the start of a new block (and not the very first one)
-                        # It should crossfade from the previous one.
-                        # We also know we added `pad_head` to it.
-                        
-                        if p_info["is_block_start"] and p_info["block_index"] > 0:
-                            # Apply crossfadein
-                            # This causes MoviePy to expect an overlap
-                            c = c.crossfadein(config.transition_duration)
-                            
-                        # Note: We rely on the fact that `concatenate_videoclips` with method='compose'
-                        # will respect `c.start` which is adjusted by crossfadein?
-                        # Actually no, `concatenate_videoclips` calculates start times sequentially.
-                        # If a clip has `crossfadein(d)`, it effectively starts `d` seconds earlier relative to "end of prev".
-                        # MoviePy source code suggests `concatenate_videoclips` handles `padding` globally.
-                        
-                        # ALTERNATIVE:
-                        # We can manually set `start` times for a CompositeVideoClip.
-                        # But that's hard.
-                        
-                        # LET'S USE A GLOBAL PADDING if we can?
-                        # No, chunks inside a block have 0 padding.
-                        
-                        # TRICK:
-                        # If we use `crossfadein`, `concatenate_videoclips(..., padding=None)` might not auto-overlap.
-                # -------------------------------------------------------------------------
-                # RE-ASSEMBLY LOGIC (Fixing Transition Issues)
-                # -------------------------------------------------------------------------
-                
-                # 1. Load all physical file parts
-                loaded_parts = []
-                for idx, p_info in enumerate(part_files):
-                    c = VideoFileClip(p_info["file"])
-                    loaded_parts.append({
-                        "clip": c,
-                        "block_index": p_info["block_index"],
-                        "chunk_index": idx
-                    })
-                
-                # 2. Group parts into "Logical Blocks" (Scenes)
-                #    A Logical Block may consist of multiple file parts (chunks).
-                #    Inside a block, parts are Hard Cut (they are just time segments).
-                logical_blocks = []
-                current_group = []
-                current_blk_idx = -1
-                
-                for item in loaded_parts:
-                    if item["block_index"] != current_blk_idx:
-                        if current_group:
-                            # Concat previous group into one Block Clip
-                            if len(current_group) == 1:
-                                logical_blocks.append(current_group[0])
-                            else:
-                                logical_blocks.append(concatenate_videoclips(current_group, method="compose"))
-                        
-                        current_group = []
-                        current_blk_idx = item["block_index"]
-                    
-                    current_group.append(item["clip"])
-                
-                # Append last group
-                if current_group:
-                    if len(current_group) == 1:
-                        logical_blocks.append(current_group[0])
-                    else:
-                        logical_blocks.append(concatenate_videoclips(current_group, method="compose"))
-                        
-                logger.info(f"Assembled {len(logical_blocks)} logical blocks (scenes).")
-
-                # 3. Apply Transitions between Logical Blocks
-                if config.transition_type == "Crossfade" and len(logical_blocks) > 1:
-                    logger.info(f"Applying CROSSFADE (Duration: {config.transition_duration}s)...")
-                    
-                    # We need to apply .crossfadein() to blocks 1..N
-                    # And use negative padding during concat.
-                    
-                    # Note: logical_blocks[i] is now a Clip object (FileClip or CompositeClip)
-                    
-                    processed_blocks = []
-                    # Keep first block as is
-                    processed_blocks.append(logical_blocks[0])
-                    
-                    for i in range(1, len(logical_blocks)):
-                        blk = logical_blocks[i]
-                        # Apply crossfadein to the start of this block
-                        # This works because we rendered EXTRA frames (Head Padding) for this block
-                        blk = blk.crossfadein(config.transition_duration)
-                        processed_blocks.append(blk)
-                    
-                    # Concat with overlap
-                    # padding should be negative duration
-                    final_video_visual = concatenate_videoclips(
-                        processed_blocks, 
-                        method="compose", 
-                        padding= -config.transition_duration
-                    )
-                    
-                else:
-                    # Hard Cut OR Fade to Black
-                    # For Fade to Black, the effect is already "baked" into the pixels during render loop (fadein/out).
-                    # So we just concat them linearly.
-                    # Optimization: Use 'chain' instead of 'compose' for linear concatenation.
-                    # 'chain' avoids the overhead of CompositeVideoClip frame blending logic.
-                    logger.info(f"Concatenating blocks linearly (Method: Chain). (Config Type: '{config.transition_type}')")
-                    final_video_visual = concatenate_videoclips(logical_blocks, method="chain")
-                
-                # Set Audio
-                if progress_callback:
-                    progress_callback(0.85, f"Batch {i+1}: Assembling & syncing audio...")
-                
-                final_duration = main_audio.duration
-                if final_video_visual.duration > final_duration + 1.0: # Allow slight slack
-                      # If video is way longer, it might be due to excess padding accumulation error?
-                      # Or simply original strategy.
-                      # We clip to audio.
-                     logger.warning(f"Video ({final_video_visual.duration:.2f}s) > Audio ({final_duration:.2f}s). Clipping video.")
-                     final_video_visual = final_video_visual.subclip(0, final_duration)
-                elif final_video_visual.duration < final_duration:
-                     logger.warning(f"Video ({final_video_visual.duration}s) < Audio ({final_duration}s). Padding video (or letting it hold).")
-                     final_video_visual = final_video_visual.set_duration(final_duration)
-                     
-                # Overlay Subtitles Globally
-                # Subtitles will be burnt in via FFmpeg filter during write_videofile
-                if progress_callback:
-                    progress_callback(0.9, f"Batch {i+1}: Preparing subtitle filter...")
-                logger.info("Subtitles will be added via ffmpeg filter.")
-
-                final_video = final_video_visual.set_audio(main_audio)
-                
-                # Add BGM
-                if config.bgm_file:
-                    bgm_path = os.path.join(self.assets_dir, "bgm", config.bgm_file)
-                    if os.path.exists(bgm_path):
-                        from moviepy.audio.fx.all import audio_loop, volumex
-                        bgm_clip = AudioFileClip(bgm_path)
-                        # Loop bgm
-                        bgm_clip = audio_loop(bgm_clip, duration=final_video.duration)
-                        bgm_clip = bgm_clip.fx(volumex, 0.3)
-                        # Composite
-                        final_audio = CompositeAudioClip([final_video.audio, bgm_clip])
-                        final_video = final_video.set_audio(final_audio)
-
-                output_filename = os.path.join(batch_dir, f"batch_{i+1}.mp4")
-                logger.info(f"Saving Final Video to {output_filename}")
-                logger.info("This step includes FFmpeg encoding and burning subtitles. Please wait...")
-
-                if progress_callback:
-                    progress_callback(0.95, f"Batch {i+1}: Encoding final video (this may take a while)...")
-                
-                # Prepare subtitle filter args
-                # Use forward slashes and ensure absolute path for filter
-                srt_abspath = os.path.abspath(srt_path)
-                
-                logger.info("--- Subtitle Debug Info ---")
-                logger.info(f"Environment: {os.name} (posix=Linux/Mac, nt=Windows)")
-                logger.info(f"Original SRT Path: {srt_path}")
-                logger.info(f"Absolute SRT Path: {srt_abspath}")
-                
-                if os.path.exists(srt_abspath):
-                    logger.info(f"SRT File Exists. Size: {os.path.getsize(srt_abspath)} bytes")
-                else:
-                    logger.error(f"CRITICAL: SRT file does NOT exist at {srt_abspath}")
-
-                # Default to original
-                final_srt_path = srt_abspath
-
-                # Apply offset to align subtitles (User requested "slower"/later)
-                # Shifting by -0.5 seconds to appear EARLIER (counteract lag)
-                SHIFT_SECONDS = -0.5
-                try:
-                    logger.info(f"Applying {SHIFT_SECONDS}s shift to subtitles (Advanced/Earlier)...")
-                    
-                    # Open the ORIGINAL (or current) SRT to shift it
+                if not os.path.exists(shifted_srt_path):
+                    logger.info(f"Applying {SHIFT_SECONDS}s shift to subtitles...")
                     subs_obj = pysrt.open(srt_abspath)
                     subs_obj.shift(seconds=SHIFT_SECONDS)
-                    
-                    shifted_srt_name = f"shifted_{os.path.basename(srt_path)}"
-                    shifted_srt_path = os.path.join(batch_dir, shifted_srt_name)
                     subs_obj.save(shifted_srt_path, encoding='utf-8')
+                
+                final_srt_path = os.path.abspath(shifted_srt_path)
+            except Exception as e:
+                logger.error(f"Error shifting subtitles: {e}")
+
+            # Path formatting for FFmpeg 'subtitles' filter
+            srt_filter_path = final_srt_path.replace('\\', '/')
+            if os.name == 'nt':
+                srt_filter_path = srt_filter_path.replace(':', '\\:')
+            
+            # Subtitle Style
+            def hex_to_ass(hex_color):
+                c = hex_color.lstrip('#')
+                if len(c) == 6:
+                    r, g, b = c[0:2], c[2:4], c[4:6]
+                    return f"&H00{b}{g}{r}".upper()
+                return "&H00FFFFFF"
+
+            primary_color_ass = hex_to_ass(config.subtitle_color)
+            font_name_escaped = config.subtitle_font_name.replace(" ", r"\ ")
+            
+            style_str = (
+                f"Fontname={font_name_escaped},FontSize={config.subtitle_font_size},"
+                f"PrimaryColour={primary_color_ass},Outline={config.subtitle_outline},"
+                f"Shadow={config.subtitle_shadow},MarginV={config.subtitle_margin_v},"
+                f"Alignment=2,Bold={1 if config.subtitle_bold else 0}"
+            )
+            
+            ffmpeg_sub_filter = f"subtitles='{srt_filter_path}':force_style='{style_str}'"
+            # --- END SUBTITLE PREPARATION ---
+
+            output_filename = os.path.join(batch_dir, f"batch_{i+1}.mp4")
+            logger.info(f"Saving Final Video to {output_filename}")
+
+
+            if use_fast_path:
+                logger.info(">>> FAST PATH ACTIVATED: Using Direct FFmpeg Concatenation <<<")
+                
+                # 1. Generate Concat List
+                concat_list_path = os.path.join(batch_dir, f"concat_list_{i}.txt")
+                with open(concat_list_path, 'w', encoding='utf-8') as f:
+                    for p_info in part_files:
+                        # ffmpeg requires forward slashes and safe paths
+                        p_abs = os.path.abspath(p_info["file"]).replace('\\', '/')
+                        f.write(f"file '{p_abs}'\n")
+                
+                # 2. Prepare Audio (Mix in Python, export to temp)
+                # This ensures we get specific BGM looping and volume correct without complex ffmpeg filters
+                if progress_callback:
+                    progress_callback(0.85, f"Batch {i+1}: Mixing Audio...")
                     
-                    final_srt_path = os.path.abspath(shifted_srt_path)
-                    logger.info(f"Subtitles shifted. Using NEW SRT file: {final_srt_path}")
-                except Exception as e:
-                    logger.error(f"Error shifting subtitles: {e}")
-                    logger.warning(f"Fallback to ORIGINAL SRT: {final_srt_path}")
-
-                # Path formatting for FFmpeg 'subtitles' filter
-                # 1. Normalize slashes to forward slashes (works on both Linux and Windows for FFmpeg)
-                srt_filter_path = final_srt_path.replace('\\', '/')
+                temp_audio_path = os.path.join(batch_dir, f"temp_audio_{i}.m4a")
                 
-                # 2. Handle Windows drive letters specifically
-                if os.name == 'nt':
-                    # On Windows, 'C:/' -> 'C\:/' for filter escaping
-                    srt_filter_path = srt_filter_path.replace(':', '\\:')
-                
-                logger.info(f"Escaped Path for Filter: {srt_filter_path}")
-                
-                # Convert color from valid Hex #RRGGBB to ASS &H00BBGGRR
-                def hex_to_ass(hex_color):
-                    c = hex_color.lstrip('#')
-                    if len(c) == 6:
-                        r, g, b = c[0:2], c[2:4], c[4:6]
-                        # ASS format: &HAABBGGRR (AA=Alpha)
-                        return f"&H00{b}{g}{r}".upper()
-                    return "&H00FFFFFF"
-
-                primary_color_ass = hex_to_ass(config.subtitle_color)
-                
-                # NOTE: Fontname with spaces can be tricky. We escape spaces with backslash just in case.
-                font_name = config.subtitle_font_name
-                font_name_escaped = font_name.replace(" ", r"\ ")
-                
-                style_str = (
-                    f"Fontname={font_name_escaped},FontSize={config.subtitle_font_size},"
-                    f"PrimaryColour={primary_color_ass},Outline={config.subtitle_outline},"
-                    f"Shadow={config.subtitle_shadow},MarginV={config.subtitle_margin_v},"
-                    f"Alignment=2,Bold={1 if config.subtitle_bold else 0}"
-                )
-
-                ffmpeg_params = [
-                    '-vf', 
-                    f"subtitles='{srt_filter_path}':force_style='{style_str}'"
-                ]
-                logger.info(f"Final ffmpeg_params: {ffmpeg_params}")
-                logger.info("---------------------------------\n")
-                
-                # Write file
-                final_video.write_videofile(
-                    output_filename, 
-                    fps=24, 
-                    codec='libx264', 
-                    audio_codec='aac',
-                    threads=render_threads,
-                    preset='ultrafast', # <--- Major speedup
-                    logger=None,
-                    ffmpeg_params=ffmpeg_params
-                )
-                logger.info(f"Video encoding finished: {output_filename}")
-                generated_files.append(output_filename)
-                
-                # Save Metadata
-                meta_filename = output_filename.replace('.mp4', '_metadata.json')
                 try:
-                    with open(meta_filename, 'w', encoding='utf-8') as f:
-                        json.dump(batch_metadata, f, indent=2, ensure_ascii=False)
-                    logger.info(f"Metadata saved to {meta_filename}")
+                    # Main Audio
+                    final_audio_clip = main_audio
+                    
+                    # Add BGM if needed
+                    if config.bgm_file:
+                        bgm_path = os.path.join(self.assets_dir, "bgm", config.bgm_file)
+                        if os.path.exists(bgm_path):
+                             from moviepy.audio.fx.all import audio_loop, volumex
+                             bgm_clip = AudioFileClip(bgm_path)
+                             # Calculate duration from parts
+                             total_vid_dur = sum(p["pad_head"] + p.get("duration",0) + p["pad_tail"] for p in render_tasks)
+                             # No, easier: Use main_audio duration
+                             target_dur = main_audio.duration
+                             bgm_clip = audio_loop(bgm_clip, duration=target_dur)
+                             bgm_clip = bgm_clip.fx(volumex, 0.3)
+                             final_audio_clip = CompositeAudioClip([main_audio, bgm_clip])
+                    
+                    # Write Temp Audio
+                    # Explicitly use 'aac' to avoid libfdk_aac dependency issues
+                    final_audio_clip.write_audiofile(temp_audio_path, logger=None, fps=44100, codec='aac')
+                    
+                    # 3. Run FFmpeg
+                    if progress_callback:
+                        progress_callback(0.95, f"Batch {i+1}: Final FFmpeg Encoding...")
+                    
+                    import subprocess
+                    
+                    # Check if text file exists
+                    if not os.path.exists(concat_list_path):
+                        raise RuntimeError("Concat list file missing!")
+
+                    cmd = [
+                        "ffmpeg", "-y",
+                        "-f", "concat",
+                        "-safe", "0",
+                        "-i", concat_list_path,
+                        "-i", temp_audio_path,
+                        "-vf", ffmpeg_sub_filter,
+                        "-c:v", "libx264",
+                        "-preset", "ultrafast",
+                        "-c:a", "aac",
+                        "-threads", str(render_threads),
+                        "-map", "0:v",
+                        "-map", "1:a",
+                        "-shortest", # Finish when shortest input ends (usually audio)
+                        output_filename
+                    ]
+                    
+                    logger.info(f"Running FFmpeg: {' '.join(cmd)}")
+                    
+                    # Run Command
+                    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                    stdout, stderr = process.communicate()
+                    
+                    if process.returncode != 0:
+                        logger.error(f"FFmpeg Error: {stderr}")
+                        raise RuntimeError("FFmpeg encoding failed.")
+                    else:
+                        logger.info("FFmpeg Fast Path Complete.")
+                        generated_files.append(output_filename)
+                        
                 except Exception as e:
-                    logger.error(f"Error saving metadata: {e}")
+                     logger.error(f"Fast Path Failed: {e}. Falling back to standard method.")
+                     use_fast_path = False
+                     # Fallback proceeds below...
+
+            if not use_fast_path:
+                # --- STANDARD MOVIEPY PATH (Legacy/Complex) ---
+                logger.info("Using Standard MoviePy Assembly (Slow Path)...")
+
+                # Load all parts
+                clip_objects = []
+                # ... (Existing logic for logical_blocks) ...
+                try:
+                    # 1. Load all physical file parts
+                    loaded_parts = []
+                    for idx, p_info in enumerate(part_files):
+                        c = VideoFileClip(p_info["file"])
+                        loaded_parts.append({
+                            "clip": c,
+                            "block_index": p_info["block_index"],
+                            "chunk_index": idx
+                        })
+                    
+                    # 2. Group parts into "Logical Blocks" (Scenes)
+                    logical_blocks = []
+                    current_group = []
+                    current_blk_idx = -1
+                    
+                    for item in loaded_parts:
+                        if item["block_index"] != current_blk_idx:
+                            if current_group:
+                                # Concat previous group into one Block Clip
+                                if len(current_group) == 1:
+                                    logical_blocks.append(current_group[0])
+                                else:
+                                    logical_blocks.append(concatenate_videoclips(current_group, method="compose"))
+                            
+                            current_group = []
+                            current_blk_idx = item["block_index"]
+                        
+                        current_group.append(item["clip"])
+                    
+                    # Append last group
+                    if current_group:
+                        if len(current_group) == 1:
+                            logical_blocks.append(current_group[0])
+                        else:
+                            logical_blocks.append(concatenate_videoclips(current_group, method="compose"))
+                            
+                    logger.info(f"Assembled {len(logical_blocks)} logical blocks (scenes).")
+
+                    # 3. Apply Transitions between Logical Blocks
+                    if config.transition_type == "Crossfade" and len(logical_blocks) > 1:
+                        logger.info(f"Applying CROSSFADE (Duration: {config.transition_duration}s)...")
+                        
+                        # We need to apply .crossfadein() to blocks 1..N
+                        processed_blocks = []
+                        # Keep first block as is
+                        processed_blocks.append(logical_blocks[0])
+                        
+                        for i in range(1, len(logical_blocks)):
+                            blk = logical_blocks[i]
+                            blk = blk.crossfadein(config.transition_duration)
+                            processed_blocks.append(blk)
+                        
+                        # Concat with overlap
+                        # padding should be negative duration
+                        final_video_visual = concatenate_videoclips(
+                            processed_blocks, 
+                            method="compose", 
+                            padding= -config.transition_duration
+                        )
+                    else:
+                        logger.info(f"Concatenating blocks linearly (Method: Chain). (Config Type: '{config.transition_type}')")
+                        final_video_visual = concatenate_videoclips(logical_blocks, method="chain")
+                    
+                    # Set Audio
+                    if progress_callback:
+                        progress_callback(0.85, f"Batch {i+1}: Assembling & syncing audio...")
+                    
+                    final_duration = main_audio.duration
+                    if final_video_visual.duration > final_duration + 1.0: # Allow slight slack
+                         logger.warning(f"Video ({final_video_visual.duration:.2f}s) > Audio ({final_duration:.2f}s). Clipping video.")
+                         final_video_visual = final_video_visual.subclip(0, final_duration)
+                    elif final_video_visual.duration < final_duration:
+                         logger.warning(f"Video ({final_video_visual.duration}s) < Audio ({final_duration}s). Padding video (or letting it hold).")
+                         final_video_visual = final_video_visual.set_duration(final_duration)
+                         
+                    final_video = final_video_visual.set_audio(main_audio)
+                    
+                    # Add BGM
+                    if config.bgm_file:
+                        bgm_path = os.path.join(self.assets_dir, "bgm", config.bgm_file)
+                        if os.path.exists(bgm_path):
+                            from moviepy.audio.fx.all import audio_loop, volumex
+                            bgm_clip = AudioFileClip(bgm_path)
+                            bgm_clip = audio_loop(bgm_clip, duration=final_video.duration)
+                            bgm_clip = bgm_clip.fx(volumex, 0.3)
+                            final_audio = CompositeAudioClip([final_video.audio, bgm_clip])
+                            final_video = final_video.set_audio(final_audio)
+
+                    logger.info("This step includes FFmpeg encoding and burning subtitles. Please wait...")
+
+                    if progress_callback:
+                        progress_callback(0.95, f"Batch {i+1}: Encoding final video (this may take a while)...")
+                    
+                    ffmpeg_params = [
+                        '-vf', 
+                        ffmpeg_sub_filter # Reusing the filter string prepared above
+                    ]
+                    logger.info(f"Final ffmpeg_params: {ffmpeg_params}")
+                    
+                    # Write file
+                    final_video.write_videofile(
+                        output_filename, 
+                        fps=24, 
+                        codec='libx264', 
+                        audio_codec='aac',
+                        threads=render_threads,
+                        preset='ultrafast',
+                        logger=None,
+                        ffmpeg_params=ffmpeg_params
+                    )
+                    logger.info(f"Video encoding finished: {output_filename}")
+                    generated_files.append(output_filename)
+
+                finally:
+                    # Close clips logic handled in global finally block usually, 
+                    # but here we should close local clips if we opened them in this block
+                    pass
+                
+                # --- END STANDARD PATH ---
+
+            # Save Metadata
+            meta_filename = output_filename.replace('.mp4', '_metadata.json')
+                
+
+            try:
+                with open(meta_filename, 'w', encoding='utf-8') as f:
+                    json.dump(batch_metadata, f, indent=2, ensure_ascii=False)
+                logger.info(f"Metadata saved to {meta_filename}")
+            except Exception as e:
+                logger.error(f"Error saving metadata: {e}")
                 
             finally:
                 # Close all clips
