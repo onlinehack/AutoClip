@@ -182,9 +182,12 @@ class Matcher:
                         safety_break += 1
                         continue
 
-                    # Just skip to next attempt
-                    safety_break += 1
-                    continue
+                    # Fallback: If video is valid but strictly shorter than target random length,
+                    # just take the whole video instead of skipping.
+                    # This is crucial for high-speed clips (e.g. 3.0x) where required source duration is long.
+                    start_t = 0.0
+                    sub = temp_clip.subclip(0, vid_len)
+                    actual_dur = vid_len
                 else:
                     max_start = vid_len - this_dur
                     start_t = random.uniform(0, max_start)
