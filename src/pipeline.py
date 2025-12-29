@@ -89,6 +89,10 @@ class AutoClipPipeline:
         generated_files = []
 
         for i in range(config.batch_count):
+            # Reset used files for this new video to ensure it starts fresh
+            # But within this video, it will try not to reuse clips until exhausted.
+            self.matcher.reset_usage()
+
             logger.info(f"=== Starting Batch {i+1}/{config.batch_count} ===")
             
             # Reload audio for each batch to ensure fresh file handles

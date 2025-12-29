@@ -47,6 +47,7 @@ def generate_srt(audio_file: str, output_srt: str) -> None:
             vad_model="fsmn-vad",
             punc_model="ct-punc",
             log_level="ERROR",
+            disable_update=True,
             # device=device # AutoModel usually detects, but we can rely on default
         )
         print(f"[{datetime.now()}] [ASR] Model loaded.")

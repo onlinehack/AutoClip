@@ -13,6 +13,13 @@ class Matcher:
         self.assets_dir = assets_dir
         # folder_path -> { 'videos': [], 'current_vid_idx': 0, 'current_time': 0.0 }
         self.folder_states = {}
+        # Track used files for unique selection within a session
+        self.used_files = set()
+
+    def reset_usage(self):
+        """Reset the history of used files. Call this at the start of a new video."""
+        logger.info(f"Resetting usage history. Previously used {len(self.used_files)} unique files.")
+        self.used_files.clear()
 
     def _init_folder_state(self, folder_path: str):
         if folder_path not in self.folder_states:
@@ -112,7 +119,7 @@ class Matcher:
         """
         Randomly select multiple clips from folder to fill target_total_duration.
         Each clip length is between min_dur and max_dur.
-        Does NOT maintain state (Pure Random).
+        Maintains internal `used_files` state to avoid repetition until exhausted.
         """
         self._init_folder_state(folder_path) # Just to load list
         state = self.folder_states[folder_path]
@@ -144,8 +151,19 @@ class Matcher:
                 
             if this_dur <= 0.05: 
                 break
-                
-            vid_path = random.choice(videos)
+            
+            # --- Unique Selection Logic ---
+            candidates = [v for v in videos if v not in self.used_files]
+            
+            if not candidates:
+                logger.warning(f"All {len(videos)} videos in {os.path.basename(folder_path)} have been used. Resetting pool for this folder.")
+                # Allow reuse of just the videos in this folder
+                for v in videos:
+                    self.used_files.discard(v)
+                candidates = videos
+            
+            vid_path = random.choice(candidates)
+            # ------------------------------
             
             try:
                 # CACHING LOGIC
@@ -160,15 +178,11 @@ class Matcher:
                 
                 if vid_len < this_dur:
                     # If video is too short, we skip it or take all
-                    # For stability, let's just skip very short videos in random mode
-                    # unless it's the only option? No, we have a list.
                     if vid_len < 0.5:
                         safety_break += 1
                         continue
-                    
-                    # Take what we can? 
-                    # If we need 2s but video is 1s.
-                    # Let's just find another one.
+
+                    # Just skip to next attempt
                     safety_break += 1
                     continue
                 else:
@@ -187,8 +201,11 @@ class Matcher:
                     "is_random_cut": True
                 })
                 
+                # Mark as Used
+                self.used_files.add(vid_path)
+                
                 current_len += actual_dur
-                logger.info(f"Random cut: {os.path.basename(vid_path)} [{start_t:.2f}s - {start_t + actual_dur:.2f}s] (Dur: {actual_dur:.2f}s) | Progress: {current_len:.1f}/{target_total_duration:.1f}")
+                logger.info(f"Random cut (Unique): {os.path.basename(vid_path)} [{start_t:.2f}s - {start_t + actual_dur:.2f}s]")
                 
             except Exception as e:
                 logger.error(f"Error reading {vid_path}: {e}")
@@ -202,26 +219,10 @@ class Matcher:
             return None, []
             
         if len(clips_to_concat) == 1:
-            # We must NOT close the clip because it's being returned.
-            # But we should close others in cache if they were unused (unlikely logic path here but good practice)
-            # Actually, return the clip. The caller (Worker) will close it.
-            # BUT, the clip is typically a subclip. Does closing subclip close the master in local_clip_cache?
-            # Issue: accessing subclip after master is closed fails.
-            # So we must keep masters alive.
-            # We attach the cache to the clip so it survives until clip is garbage collected/closed?
             res_clip = clips_to_concat[0]
             res_clip.sources_cache = local_clip_cache # Hack to keep RefCount > 0
             return res_clip, segments_used
         else:
-            # Concatenate
-            # method='compose' is safer for mixed formats. 'chain' is faster but fragile.
-            # Given we resized? No, we haven't resized yet! Matcher just returns raw clips. 
-            # Resize happens in Pipeline.
-            # So sources might have different resolutions!
-            # concatenate_videoclips with method='compose' handles resolution mismatch (scales to biggest).
-            # But we prefer uniform resize later. 
-            # If we return a composite, Pipeline will resize the composite.
-            
             final_clip = concatenate_videoclips(clips_to_concat, method="compose")
             final_clip.sources_cache = local_clip_cache # Keep masters alive
             return final_clip, segments_used
@@ -250,4 +251,3 @@ class Matcher:
         clip = clip.crop(width=target_w, height=target_h, x_center=clip.w/2, y_center=clip.h/2)
         
         return clip
-
