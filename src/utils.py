@@ -21,12 +21,14 @@ def get_video_files(folder_path: str) -> List[str]:
     """
     Get all .mp4 files in a directory.
     """
-    if not os.path.exists(folder_path):
-        return []
+    video_extensions = (
+        '.mp4', '.mov', '.avi', '.mkv', '.flv', '.wmv', 
+        '.webm', '.m4v', '.mpg', '.mpeg', '.3gp', '.ts', '.mts'
+    )
     return [
         os.path.join(folder_path, f) 
         for f in os.listdir(folder_path) 
-        if f.lower().endswith('.mp4')
+        if f.lower().endswith(video_extensions)
     ]
 
 def get_subfolders(base_path: str) -> List[str]:
